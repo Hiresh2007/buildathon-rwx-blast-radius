@@ -1,11 +1,19 @@
 """Select candidate tests using only facts measured on the unchanged SQLGlot tree."""
 
 import ast
+import gzip
+from io import BytesIO
+import json
 import os
 import re
+from tokenize import detect_encoding
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
+
+from execution import ExecutionIndex, ScopeChange
+from predicates import exemptions, load_domains
+from symbols import SymbolIndex
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -137,6 +145,7 @@ class Source:
         self.text = text
         tree = ast.parse(text, filename=path)
         self.tree = tree
+        self.syntax = ast.dump(tree)
         self.scopes = sorted(
             (node for node in ast.walk(tree) if isinstance(node, (*_FUNCTIONS, ast.ClassDef))),
             key=lambda node: (node.end_lineno - _decl_start(node), -node.lineno),
@@ -160,6 +169,11 @@ class Source:
                      if node.lineno <= line <= node.end_lineno), None)
 
 
+def _read_map(name):
+    with gzip.open(Path(__file__).with_name(name), "rt", encoding="utf-8") as stream:
+        return json.load(stream)
+
+
 class ImpactIndex:
     def __init__(self, map_data, tests, source_root=None):
         if source_root is None:
@@ -168,6 +182,16 @@ class ImpactIndex:
                 local if local.is_dir() else "/opt/sqlglot"
             )
         self.root = Path(source_root)
+        here = Path(__file__).resolve().parent
+        ids = map_data["ids"]
+        self.execution = ExecutionIndex(_read_map("execution.json.gz"), ids)
+        self.symbols = SymbolIndex(_read_map("symbols.json.gz"), ids, self.root)
+        self.domains = load_domains(here / "predicates.json.gz", ids)
+        deps = _read_map("dependencies.json.gz")
+        if deps["ids"] != ids:
+            raise ValueError("isolated test map uses another inventory")
+        self.isolated = {path: int(bits, 16) for path, bits in deps["files"].items()}
+        self.unknown = int(deps["unknown"], 16)
         live = {test["id"]: test["number"] for test in tests}
         self.numbers = [live.get(name) for name in map_data["ids"]]
         self.unmeasured = set(live.values()).difference(self.numbers)
@@ -186,6 +210,19 @@ class ImpactIndex:
     @lru_cache(maxsize=16)
     def source(self, path):
         return Source((self.root / path).read_text(encoding="utf-8"), path)
+
+    def related_tests(self, patch):
+        """Whole-suite execution takes priority over a dependency seen only on import."""
+        observed = isolated = 0
+        try:
+            for change in _parse_diff(patch):
+                for mask in self.files.get(change.path, {}).values():
+                    observed |= mask
+                observed |= self.reads.get(change.path, 0)
+                isolated |= self.isolated.get(change.path, 0)
+        except PatchError:
+            return []
+        return [self.tests_from_bits(observed), self.tests_from_bits(isolated & ~observed)]
 
     def tests_from_bits(self, bits):
         selected = set(self.unmeasured)
@@ -244,24 +281,88 @@ def _setting_change(path, source, candidate, replaced, inserted, index):
     return None
 
 
-def _python_change(change, index):
+def _same_outside_scopes(source, candidate, scopes):
+    """Ignore only bodies of named functions that the original edit actually touches."""
+    def signature(tree):
+        class Skeleton(ast.NodeTransformer):
+            def visit_FunctionDef(self, node):
+                if (node.lineno, node.name) in scopes:
+                    node.body = []
+                    return node
+                return self.generic_visit(node)
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+        return ast.dump(Skeleton().visit(tree))
+
+    return signature(ast.parse(source)) == signature(candidate)
+
+
+def _balanced_replacements(hunks):
+    for _, hunk in hunks:
+        delta = 0
+        for line in [*hunk, " "]:
+            if line[0] == " ":
+                if delta:
+                    return False
+            else:
+                delta += 1 if line[0] == "+" else -1
+    return True
+
+
+def _prepare_change(change, index):
     source = index.source(change.path)
     changed, replaced, inserted = _apply(source.text, change.hunks)
-    tree = ast.parse(changed, filename=change.path)
-    # Comments inside string literals or changes involving indentation alter the AST.
-    # Explicit consumers of the file itself may still observe an equivalent rewrite.
+    # The interpreter honors a coding cookie in the first two lines of each file.
+    # Compiling bytes checks that cookie and the complete module's lexical scope.
+    raw = changed.encode("utf-8")
+    if detect_encoding(BytesIO(raw).readline)[0] != detect_encoding(BytesIO(source.text.encode("utf-8")).readline)[0]:
+        raise PatchError("changed source encoding")
+    tree = compile(raw, change.path, "exec", ast.PyCF_ONLY_AST, dont_inherit=True)
+    compile(tree, change.path, "exec", dont_inherit=True)
+    return source, changed, tree, replaced, inserted
+
+
+def _python_change(change, index, prepared):
+    source, changed, tree, replaced, inserted = prepared
     reads = index.reads.get(change.path, 0)
-    if ast.dump(tree) == ast.dump(source.tree):
-        return reads
-    compile(tree, change.path, "exec")
+    # A test whose subprocess escaped the whole-suite tracer is still represented
+    # in its own clean process tree's dependency map.
+    cold = index.isolated.get(change.path, 0) | index.unknown
+    partial = index.incomplete & cold
     setting = _setting_change(change.path, source, tree, replaced, inserted, index)
     if setting is not None:
-        return setting | reads | index.incomplete
-    covered = index.files.get(change.path, {})
+        return setting | reads | partial
+
+    line_bits = index.all_bits
+    if _balanced_replacements(change.hunks):
+        line_bits = _line_change(change.path, source, replaced, inserted, index)
+    execution_bits = index.execution.select(change.path, source.text, tree)
+    if execution_bits is not None:
+        line_bits &= execution_bits
+    else:
+        if line_bits != index.all_bits:
+            scopes = set()
+            for line in replaced:
+                scope = source.runtime_scope(line)
+                if scope is not None:
+                    scopes.add((scope.lineno, scope.name))
+            # Never mutate the cached or candidate ASTs used by the other analyses.
+            if not _same_outside_scopes(source.text, ast.parse(changed), scopes):
+                line_bits = index.all_bits
+        if line_bits == index.all_bits:
+            symbols = index.symbols.select(change.path, source.tree, tree, source.text, changed)
+            if symbols is not None:
+                line_bits = symbols
+    exempt = exemptions(change.path, source.tree, tree, index.domains, replaced, inserted)
+    return (line_bits & ~exempt) | reads | partial
+
+
+def _line_change(path, source, replaced, inserted, index):
+    covered = index.files.get(path, {})
     if not covered:
         return index.all_bits
-    selected = reads | index.incomplete
-    during_collection = index.import_lines.get(change.path, set())
+    selected = 0
+    during_collection = index.import_lines.get(path, set())
     for line in replaced:
         scope = source.runtime_scope(line)
         statement = source.statement(line)
@@ -290,16 +391,34 @@ def choose_tests(patch_text, index, tests=None):
     if index is None:
         return {test["number"] for test in tests}
     try:
+        changes = _parse_diff(patch_text)
+        if len({change.path for change in changes}) != len(changes):
+            return set(index.all)
         bits = 0
-        for change in _parse_diff(patch_text):
+        code = []
+        for change in changes:
             if change.path.endswith(".py"):
-                bits |= _python_change(change, index)
+                prepared = _prepare_change(change, index)
+                baseline, _, candidate, _, _ = prepared
+                if baseline.syntax == ast.dump(candidate):
+                    bits |= index.reads.get(change.path, 0)
+                elif not change.path.startswith("sqlglot/"):
+                    return set(index.all)
+                else:
+                    code.append((change, prepared))
             elif change.path in index.reads:
-                bits |= index.reads[change.path] | index.incomplete
+                # Every test that opens the changed fixture remains eligible, even
+                # when a source edit in this patch also alters its interpretation.
+                _apply((index.root / change.path).read_text(encoding="utf-8"), change.hunks)
+                bits |= index.reads[change.path] | (index.incomplete & (
+                    index.isolated.get(change.path, 0) | index.unknown))
             else:
                 return set(index.all)
-            if bits == index.all_bits:
-                return set(index.all)
+        if len(code) > 1:
+            return set(index.all)
+        if code:
+            change, prepared = code[0]
+            bits |= _python_change(change, index, prepared)
         return index.tests_from_bits(bits)
-    except (PatchError, OSError, UnicodeError, SyntaxError, RecursionError, ValueError):
+    except (ScopeChange, OSError, UnicodeError, SyntaxError, RecursionError, ValueError):
         return set(index.all)

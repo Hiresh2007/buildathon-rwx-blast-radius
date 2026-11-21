@@ -1,4 +1,4 @@
 *
-!selector.py
-!impact.py
-!coverage.json.gz
+!/*.py
+!/*.json.gz
+!/requirements.lock

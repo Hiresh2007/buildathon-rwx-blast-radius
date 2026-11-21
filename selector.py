@@ -3,9 +3,12 @@
 import argparse
 import gzip
 import json
+import time
 from pathlib import Path
 
 from impact import ImpactIndex, choose_tests
+from probe import QueryProbe
+from pytest_replay import refine
 
 
 def schedule(test_numbers, milliseconds):
@@ -34,17 +37,54 @@ def schedule(test_numbers, milliseconds):
     return best_workers
 
 
+def fill_slack(workers, related, milliseconds):
+    """Add related tests while keeping the existing worker count and makespan."""
+    loads = [sum(milliseconds[n] for n in worker) for worker in workers]
+    ceiling = max(loads)
+    included = {n for worker in workers for n in worker}
+    for candidates in related:
+        for number in sorted(candidates - included, key=lambda n: (milliseconds[n], n)):
+            worker = loads.index(min(loads))
+            duration = milliseconds[number]
+            if loads[worker] + duration > ceiling:
+                break
+            workers[worker].append(number)
+            loads[worker] += duration
+            included.add(number)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path, nargs="?", default=Path("/data"))
     args = parser.parse_args()
+    started = time.monotonic()
     tests = json.loads((args.data / "tests.json").read_bytes())["tests"]
     with gzip.open(Path(__file__).with_name("coverage.json.gz"), "rt", encoding="utf-8") as stream:
         index = ImpactIndex(json.load(stream), tests)
+    probe = QueryProbe(tests)
     milliseconds = {t["number"]: round(t["seconds"] * 1000) for t in tests}
+    patches = {}
+    selections = {}
     for path in sorted((args.data / "commits").glob("*.patch")):
-        selected = choose_tests(path.read_text(encoding="utf-8", errors="replace"), index, tests)
-        print(json.dumps({"commit": path.stem, "workers": schedule(selected, milliseconds)},
+        if time.monotonic() - started > 125:
+            selections[path.stem] = index.all
+            continue
+        try:
+            patch = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            selections[path.stem] = index.all
+            continue
+        patches[path.stem] = patch
+        selected = choose_tests(patch, index, tests)
+        selections[path.stem] = probe.select(patch, index, selected, milliseconds, schedule)
+    if time.monotonic() - started < 140:
+        candidates = {key: selections[key] for key in patches}
+        selections.update(refine(patches, candidates, index, tests))
+    for key, selected in selections.items():
+        workers = schedule(selected, milliseconds)
+        if key in patches and len(workers) > 1 and selected != index.all:
+            fill_slack(workers, index.related_tests(patches[key]), milliseconds)
+        print(json.dumps({"commit": key, "workers": workers},
                          separators=(",", ":")))
 
 

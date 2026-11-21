@@ -1,32 +1,55 @@
 # Blast Radius
 
-This entry chooses SQLGlot tests for a batch of independent patches. It uses test-specific line coverage and file reads measured on the pinned SQLGlot checkout. The selector reads the live test IDs and durations, reconstructs each change in memory and emits the test numbers to run. It estimates the cost of one through eight workers in milliseconds and keeps the cheapest schedule.
+This entry builds a test schedule for each independent SQLGlot patch. It reads the live test IDs and durations, applies the patch to the pinned source in memory, and chooses the cheapest of one through eight worker schedules.
 
-## Reproduce the public benchmark
+## Run the public benchmark
 
 ```sh
-make sample
+make sample PYTHON=python3.13
+make sample-docker
 ```
 
-This downloads the public kit and pinned source into `.cache/`, runs our selector and the official starter, and scores both with the organizer's scorer. The reported local totals exclude CPU time. For the Docker runtime check, run `make sample-docker` with a linux/amd64-capable Docker engine. [Track and scoring rules](https://www.joinbuilders.org/buildathon/tracks/blast-radius)
+The first command downloads the organizer's public kit and pinned source into `.cache/` and runs both this selector and the starter. The second builds and tests the linux/amd64 image under the contest's CPU, memory, filesystem and network limits. Both commands use the organizer's scorer. The native reference results use the pinned dependency environment below. The leaderboard adds the container’s CPU time. [Track and scoring rules](https://www.joinbuilders.org/buildathon/tracks/blast-radius)
 
-On the 30 public patches, this selector scored 340.483 simulated seconds against the starter's 1,210.470. Both covered every failing test. In a separate experiment on a changed SQLGlot configuration flag, the selector scheduled six tests and included all five failures observed in a full test run.
+| Selector | Public simulated seconds | Missed patches |
+| --- | ---: | ---: |
+| Organizer starter | 1,210.470 | 0 |
+| Previous entry | 340.483 | 0 |
+| Current entry | 111.072 | 0 |
 
-The image reads `/data/tests.json` and `/data/commits/*.patch` and writes one compact JSON object per patch. It includes the pinned baseline source so it can examine surrounding code. Unknown or unsupported changes select a broader set of tests. The runtime has no external package dependencies.
+We also generated 14 independent changes across dialect settings, expression declarations, optimizer and generator code, and SQL fixtures. Each change was checked against the 1,620-test inventory. The selector covered all 1,140 failing test/patch pairs, including test files that failed to import, in 87.537 simulated seconds. The previous version took 251.008 seconds on the same changes.
 
-## Regenerate the map
+## How it chooses tests
 
-The checked-in `coverage.json.gz` is derived from test execution and fixture reads on SQLGlot commit `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`. To rebuild it after `make sample`, use an isolated Python 3.13 environment.
+- The baseline maps record test-specific source lines, bytecode blocks and files read. A second run executes each of the 1,620 tests in its own process tree to measure imports and fixture dependencies, including Python subprocesses.
+- Function edits are checked against compiled scopes and measured blocks. For eligible configuration edits, the selector imports the candidate in an isolated process and compares values with the baseline, including derived class fields and reads of individual dictionary keys.
+- For simple comparisons and local boolean guards, the selector can rule out a test when every observed operand yields the same result before and after the edit. Unmeasured values keep the candidate.
+- The longest executor tests contain independent TPC queries. When a function-body edit touches a recorded query phase, the selector can run that phase on the patched source and compare its output with the pinned result. The worker has a bounded CPU and wall-time allowance.
+- For short schedules the selector can run the actual selected pytest cases on a private copy of the changed paths. A test can be removed when its setup, body, subtests and teardown all pass. Timeouts keep the outstanding candidates.
+- Explicit readers of edited source and fixtures remain eligible for evaluation. Edits that change lexical scope, malformed diffs, and interactions between multiple changed source modules use a broader schedule. IDs missing from the baseline inventory are always included.
+
+Shorter workers can take additional related tests using their spare time without extending the schedule.
+
+The input is `/data/tests.json` and `/data/commits/*.patch`. Standard output contains one JSON object per patch. All checked-in observations come from the pinned checkout. The external scorer reads the sample answers.
+
+## Rebuild the baseline maps
+
+The checked-in maps were collected with CPython 3.13.18 and the organizer's dependency lock on SQLGlot commit `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`. After the native benchmark has downloaded the source and kit, run these commands from the repository root.
 
 ```sh
 python3.13 -m venv .cache/trace-env
-.cache/trace-env/bin/python -m pip install -r .cache/kit/requirements.lock
-.cache/trace-env/bin/python tools/build_map.py .cache/sqlglot .cache/kit/sample/tests.json coverage.json.gz
-make sample
+PY=.cache/trace-env/bin/python
+SRC=.cache/sqlglot
+TESTS=.cache/kit/sample/tests.json
+"$PY" -m pip install -r .cache/kit/requirements.lock
+export PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+"$PY" tools/build_map.py "$SRC" "$TESTS" coverage.json.gz
+"$PY" tools/build_execution.py "$SRC" "$TESTS" execution.json.gz
+"$PY" tools/build_dependencies.py "$SRC" "$TESTS" dependencies.json.gz --jobs 3
+"$PY" tools/build_symbols.py "$SRC" "$TESTS" coverage.json.gz symbols.json.gz
+"$PY" tools/build_predicates.py "$SRC" "$TESTS" predicates.json.gz
+"$PY" tools/build_query_map.py "$SRC" query-map.json.gz
+"$PY" -I -B -S symbols.py --build-baseline "$SRC" symbols.json.gz symbol-baseline.sqlite3
 ```
 
-The generator uses pytest and CPython monitoring to record each test's dependencies. It also measures reads of eligible scalar class settings so a change to a flag can select its consumers. Subprocess-only coverage is marked incomplete. The published map was generated with Python 3.13.18 on macOS. The public answers are input to the external scorer only.
-
-## Credits
-
-The source under analysis is SQLGlot. The starter, test inventory, sample patches, dependency lock and scorer are from the organizers. Publish this directory as its own public repository with the Dockerfile at the root. [Pinned SQLGlot source](https://github.com/tobymao/sqlglot/tree/eb11aec4be8cb2122afe713a4816662c3f0fb2fa) · [Official kit](https://www.joinbuilders.org/buildathon/tracks/blast-radius/files/blast-radius-sample.tar.gz)
+The contest organizers supply the sample patches, test manifest, dependency lock and scorer. SQLGlot supplies the test suite and fixtures used to generate the maps. [Organizer's kit](https://www.joinbuilders.org/buildathon/tracks/blast-radius/files/blast-radius-sample.tar.gz) · [Pinned SQLGlot source](https://github.com/tobymao/sqlglot/tree/eb11aec4be8cb2122afe713a4816662c3f0fb2fa)
