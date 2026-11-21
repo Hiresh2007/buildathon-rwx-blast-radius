@@ -28,7 +28,7 @@ def instrument():
     scopes = {}
     reads = set()
     unknown = set()
-    children = 0
+    child_pids = set()
     mon = sys.monitoring
     tool = mon.COVERAGE_ID
 
@@ -47,9 +47,7 @@ def instrument():
         enter(code, offset)
 
     def audit(event, args):
-        nonlocal children
         if event == 'subprocess.Popen':
-            children += 1
             executable, argv, _, env = args
             if (not isinstance(executable, str) or 'python' not in os.path.basename(executable)
                     or not isinstance(argv, (list, tuple)) or any(v in argv for v in ('-I', '-E', '-S'))
@@ -73,9 +71,21 @@ def instrument():
             scope = f'{code.co_firstlineno}:{code.co_qualname}'
             items.append([code.co_filename[len(root):], scope, key, bits.hex()])
         pending = log.with_suffix('.pending')
-        pending.write_text(json.dumps([items, sorted(reads), sorted(unknown), children], separators=(',', ':')))
+        pending.write_text(json.dumps([items, sorted(reads), sorted(unknown), sorted(child_pids)], separators=(',', ':')))
         pending.replace(log.with_suffix('.ready'))
 
+    # Python 3.13 multiprocessing uses fork_exec directly without a Popen audit event.
+    # Record the kernel's child PID and require its independent startup/exit receipts.
+    import _posixsubprocess
+    original_fork_exec = _posixsubprocess.fork_exec
+
+    def observed_fork_exec(*args, **kwargs):
+        pid = original_fork_exec(*args, **kwargs)
+        child_pids.add(pid)
+        return pid
+
+    _posixsubprocess.fork_exec = observed_fork_exec
+    subprocess._fork_exec = observed_fork_exec
     atexit.register(save)
     sys.addaudithook(audit)
     mon.use_tool_id(tool, 'cold pytest coverage')
@@ -129,19 +139,19 @@ def collect(root, target, timeout):
         files = {}
         reads = set()
         unknown = set()
-        children = 0
+        children = set()
         for pid in ready:
             scopes, observed_reads, untraced, spawned = json.loads((logs / f'{pid}.ready').read_bytes())
             reads.update(observed_reads)
             unknown.update(untraced)
-            children += spawned
+            children.update(map(str, spawned))
             for filename, scope, key, encoded in scopes:
                 record = files.setdefault(filename, {}).setdefault(scope, [key, 0])
                 record[1] |= int.from_bytes(bytes.fromhex(encoded), 'little')
                 if record[0] != key:
                     record[0] = None
-        if len(ready) != children + 1 or unknown:
-            raise ValueError(f'incomplete subprocess coverage: {children} spawns, {len(ready)} receipts, {unknown}')
+        if children - ready or len(ready - children) != 1 or unknown:
+            raise ValueError(f'incomplete subprocess coverage: {len(children)} spawns, {len(ready)} receipts, {unknown}')
         for scopes in files.values():
             for scope, (key, mask) in scopes.items():
                 scopes[scope] = [key, [i * 2 for i in range(mask.bit_length()) if mask & (1 << i)]]

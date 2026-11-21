@@ -17,6 +17,10 @@ def load(path):
         return json.load(stream)
 
 
+def expected_members(ids, target):
+    return {name for name in ids if target in (name, name.split("::")[0])}
+
+
 def pack(source, inventory, samples):
     ids = load(inventory)['ids']
     hashes, tree = source_manifest(source)
@@ -34,7 +38,7 @@ def pack(source, inventory, samples):
         test_hash = hashlib.sha256((source / target.split('::')[0]).read_bytes()).hexdigest()
         if sample['tree'] != tree or sample['test_hash'] != test_hash:
             raise ValueError(f'profile source does not match the checkout: {target}')
-        expected = {name for name in ids if target in (name, name.split('::')[0])}
+        expected = expected_members(ids, target)
         if not expected or sample['unknown'] or set(sample['ids']) != expected:
             raise ValueError(f'incomplete baseline pytest selection: {target}')
         bit = 1 << len(groups)

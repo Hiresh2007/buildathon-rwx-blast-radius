@@ -96,6 +96,8 @@ export PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 "$PY" -I -B -S symbols.py --build-baseline "$SRC" symbols.json.gz symbol-baseline.sqlite3
 ```
 
+The Docker build also profiles the pinned executor TPC-DS node and the optimizer test module on its own architecture. It adds a group only after pytest passes, the complete manifest matches and every spawned Python process supplies a receipt. The training step uses a four-minute wall-clock budget. A failed or timed-out collection keeps the previously recorded groups available.
+
 Build cold coverage on the target architecture with the same dependency lock and pinned source. A selector can be a full pytest file or an individual node ID. Each collection must complete without failures, skips or missing child-process receipts. For example, these commands create a map for a parser test and a test module.
 
 ```sh

@@ -15,6 +15,10 @@ RUN python /tmp/build_children.py /opt/sqlglot coverage.json.gz children.json.gz
 RUN python -I -B -S symbols.py --build-baseline /opt/sqlglot symbols.json.gz symbol-baseline.sqlite3 \
     && chmod 644 symbol-baseline.sqlite3
 
+COPY tools/profile_cold_test.py tools/pack_cold_coverage.py tools/build_cold_profiles.py /tmp/cold-tools/
+RUN python /tmp/cold-tools/build_cold_profiles.py /opt/sqlglot coverage.json.gz \
+    tests/test_executor.py::TestExecutor::test_execute_tpcds tests/test_optimizer.py
+
 ENV PYTHONDONTWRITEBYTECODE=1 SQLGLOT_ROOT=/opt/sqlglot
 USER 65534:65534
 ENTRYPOINT ["python", "selector.py"]
