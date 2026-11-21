@@ -19,6 +19,8 @@ from cache_impact import CacheConsumers
 from default_impact import DefaultIndex, functions
 from execution import ExecutionIndex, ScopeChange, changes as changed_scopes, scalar_replacements
 from lookup_domains import LookupDomains
+from none_comparisons import NoneComparisons
+from truth_guards import TruthGuards
 from predicates import exemptions, load_domains
 from symbols import SymbolIndex
 from table_values import TableValues
@@ -215,6 +217,8 @@ class ImpactIndex:
         self.arguments = ArgumentIndex(here / "arguments.json.gz", ids)
         self.defaults = DefaultIndex(here / "default-impact.json.gz", ids)
         self.table_values = TableValues(here / "table-values.json.gz", ids)
+        self.truth_guards = TruthGuards(here / "truth-guards.json.gz", ids)
+        self.none_comparisons = NoneComparisons(here / "none-comparisons.json.gz", ids)
         self.lookups = LookupDomains(here / "lookup-domains.json.gz", ids, here / "membership-values.json.gz")
         deps = _read_map("dependencies.json.gz")
         if deps["ids"] != ids:
@@ -487,6 +491,8 @@ def _python_change(change, index, prepared):
     exempt = exemptions(change.path, source.tree, tree, index.domains, replaced, inserted)
     exempt |= index.arguments.exemptions(change.path, source.tree, tree, replaced, inserted)
     exempt |= index.lookups.exemptions(change.path, source, tree, replaced, inserted) & ~index.execution.untraced
+    for observations in (index.none_comparisons, index.truth_guards):
+        exempt |= observations.exemptions(change.path, source, tree, replaced, inserted) & ~index.execution.untraced
     return (line_bits & ~exempt) | reads | partial
 
 

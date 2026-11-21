@@ -37,6 +37,8 @@ On eight paired edits that changed dictionary keys and a separate production fun
 
 Four single-file changes at frequently executed membership comparisons ran against all 1,620 tests. The Linux schedules included all 13 failing pairs in 49.308 simulated seconds, down from 94.327 at `bda301ad`. Eight independent changes to ordinary membership lists produced eight further failing pairs, all included.
 
+We selected 16 single-file changes to frequently executed or randomly sampled conditions, then ran each patch against all 1,620 tests. The changes produced 1,412 failing patch/test pairs. The current selector retained every pair in 142.194 simulated seconds across the two native batches, compared with 366.631 seconds at `62bf52a`. In a separate 30-patch batch with 16 independent source changes and 14 public fixture, comment or mixed changes, both entries retained all 2,972 failing pairs. The simulated time fell from 250.041 to 224.914 seconds.
+
 ## How it chooses tests
 
 - The baseline maps record test-specific source lines, bytecode blocks and files read. A second run executes each of the 1,620 tests in its own process tree to measure imports and fixture dependencies, including Python subprocesses.
@@ -45,6 +47,7 @@ Four single-file changes at frequently executed membership comparisons ran again
 - For required and optional expression arguments, the selector traces the validator’s actual inputs and checks which tests observe a missing key. Tests that inspect the schema directly remain eligible.
 - For simple comparisons and local boolean guards, the selector can rule out a test when every observed operand yields the same result before and after the edit. Unmeasured values keep the candidate.
 - For a literal string lookup on a built-in collection, it records the key sets seen by each test. A test can be ruled out when the changed key or fallback value leaves every observed lookup equivalent. Custom mappings and observations above the recording limits stay eligible.
+- For comparisons with `None`, the selector records which tests used built-in equality or a Python method that returns immediately for operands of different types. For simple condition changes, it records the value after the original expression is evaluated. Tests remain eligible when a custom comparison or truth method could run, when a source file is read directly, or when observations are incomplete.
 - For literal configuration dictionaries, the selector collects the keys read with subscripting and `get`. Whole-dictionary reads and unobserved processes stay eligible. The selector uses this map when an edit changes only the values of existing keys and preserves their built-in types.
 - For an edit to a scalar default argument, the trace distinguishes calls that omit the argument from calls that explicitly pass it. It records how the function used the default, including truth tests and comparisons with `None`. Tests that inspected the defaults, read the source, or ran unobserved subprocess code remain eligible.
 - For mixed patches, the selector combines readers of changed configuration values with callers that omitted changed defaults and tests that executed changed functions. It can analyze separate fields, defaults and function bodies in one file when restoring those nodes reproduces the complete original syntax tree. Any unsupported component uses the broader schedule.
@@ -79,6 +82,8 @@ export PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 "$PY" tools/build_dependencies.py "$SRC" "$TESTS" dependencies.json.gz --jobs 3
 "$PY" tools/build_symbols.py "$SRC" "$TESTS" coverage.json.gz symbols.json.gz
 "$PY" tools/build_predicates.py "$SRC" "$TESTS" predicates.json.gz
+"$PY" tools/build_none_comparisons.py "$SRC" "$TESTS" none-comparisons.json.gz
+"$PY" tools/build_truth_guards.py "$SRC" "$TESTS" truth-guards.json.gz
 "$PY" tools/build_lookup_domains.py "$SRC" "$TESTS" lookup-domains.json.gz
 "$PY" tools/build_lookup_domains.py "$SRC" "$TESTS" membership-values.json.gz --literal-members
 "$PY" tools/build_default_impact.py "$SRC" "$TESTS" default-impact.json.gz
