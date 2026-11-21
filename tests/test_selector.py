@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 import unittest
 
-from execution import ExecutionIndex, ScopeChange, changes, scalar_replacements
+from execution import ExecutionIndex, ScopeChange, changes, only_local_conditions, scalar_replacements
 from impact import ImpactIndex, Source, _apply, _parse_diff, _separate_declarations, choose_tests
 from selector import fill_slack, schedule
 
@@ -72,6 +72,25 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(scalar_replacements(code("return value + 1"), code("return value + 2")))
         self.assertFalse(scalar_replacements(code("return value + 1"), code("return len(value)")))
         self.assertFalse(scalar_replacements(code("return value + 1"), code("return value + 'x'")))
+
+    def test_membership_operand_can_change_length(self):
+        def code(expression):
+            return compile('def f(x):\n    return ' + expression, 'example.py', 'exec').co_consts[0]
+        pair = '("a", "b")', '("a", "b", "c")'
+        self.assertTrue(scalar_replacements(*(code('x in ' + keys) for keys in pair)))
+        self.assertFalse(scalar_replacements(*(code(keys) for keys in pair)))
+        self.assertFalse(scalar_replacements(code('x in ("a", "b")'), code('x in ("a", "b", 3)')))
+
+    def test_only_guards_on_local_values_may_change(self):
+        original = 'def f(x, y):\n    if x:\n        return y\n    return None\n'
+        def matches(candidate):
+            old, new = [compile(text, 'sample.py', 'exec').co_consts[0] for text in (original, candidate)]
+            return only_local_conditions(ast.parse(original), ast.parse(candidate), old, new)
+        self.assertTrue(matches(original.replace('if x:', 'if x is not None and not y:')))
+        for condition in ('x.value', 'bool(x)', 'GLOBAL', 'x > 2'):
+            self.assertFalse(matches(original.replace('if x:', 'if ' + condition + ':')))
+        changed_body = original.replace('if x:', 'if x is not None:').replace('return y', 'return x')
+        self.assertFalse(matches(changed_body))
 
     def test_child_only_function_is_preserved(self):
         path = 'sqlglot/example.py'

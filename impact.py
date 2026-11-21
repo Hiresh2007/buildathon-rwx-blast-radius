@@ -557,7 +557,8 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
                 # Operand-specific exemptions for independent edits cannot be
                 # combined: a value changed upstream may reach either function.
                 source, _, tree, _, _ = prepared
-                calls = index.execution.select(change.path, source.text, tree, local_substitutions_only=True)
+                calls = index.execution.select(change.path, source.text, tree, local_substitutions_only=True,
+                                               original_tree=source.tree)
                 if calls is None:
                     return set(index.all)
                 cold = index.isolated.get(change.path, 0) | index.unknown

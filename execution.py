@@ -122,6 +122,17 @@ def immutable_shape(before, after):
     return False
 
 
+def literal_members(before, after):
+    """Allow a membership test to gain or lose homogeneous built-in keys."""
+    if type(before) not in (tuple, frozenset) or type(before) is not type(after):
+        return False
+    items = (*before, *after)
+    if not items:
+        return False
+    key = type(items[0])
+    return key in (str, int, bytes, bool) and all(type(item) is key for item in items)
+
+
 def scalar_replacements(old, new):
     """Recognize local substitutions with the same calls, bindings and stores."""
     if old.co_names != new.co_names or old.co_exceptiontable != new.co_exceptiontable:
@@ -143,9 +154,65 @@ def scalar_replacements(old, new):
             return False
         if a.opname in ("COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_OP"):
             continue
-        if a.opname not in ("LOAD_CONST", "RETURN_CONST") or not immutable_shape(a.argval, b.argval):
+        if a.opname not in ("LOAD_CONST", "RETURN_CONST"):
             return False
+        if not immutable_shape(a.argval, b.argval):
+            if (i + 1 >= len(before) or old_ops[i + 1].opname != "CONTAINS_OP"
+                    or new_ops[i + 1].opname != "CONTAINS_OP" or not literal_members(a.argval, b.argval)):
+                return False
     return True
+
+
+def local_condition(node, local_names):
+    if isinstance(node, ast.Name):
+        return isinstance(node.ctx, ast.Load) and node.id in local_names
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return local_condition(node.operand, local_names)
+    if isinstance(node, ast.BoolOp):
+        return all(local_condition(value, local_names) for value in node.values)
+    if (isinstance(node, ast.Compare) and len(node.ops) == 1
+            and isinstance(node.ops[0], (ast.Is, ast.IsNot))):
+        a, b = node.left, node.comparators[0]
+        return ((isinstance(a, ast.Name) and a.id in local_names and isinstance(b, ast.Constant)
+                 and (b.value is None or type(b.value) is bool))
+                or (isinstance(b, ast.Name) and b.id in local_names and isinstance(a, ast.Constant)
+                    and (a.value is None or type(a.value) is bool)))
+    return False
+
+
+def only_local_conditions(original, candidate, old, new):
+    """Allow a different guard instruction sequence while keeping the rest of a function identical."""
+    if original is None:
+        return False
+    def definition(tree, code):
+        return next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and not n.decorator_list
+                     and n.lineno == code.co_firstlineno and n.name == code.co_name), None)
+    before, after = definition(original, old), definition(candidate, new)
+    if before is None or after is None:
+        return False
+    local_names = set(old.co_varnames)
+    changed_guard = False
+
+    def match(a, b):
+        nonlocal changed_guard
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, list):
+            return len(a) == len(b) and all(match(x, y) for x, y in zip(a, b))
+        if not isinstance(a, ast.AST):
+            return constant(a) == constant(b)
+        if a is not before and isinstance(a, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return ast.dump(a) == ast.dump(b)
+        for field in a._fields:
+            x, y = getattr(a, field), getattr(b, field)
+            if (field == "test" and isinstance(a, (ast.If, ast.IfExp, ast.While))
+                    and local_condition(x, local_names) and local_condition(y, local_names)):
+                changed_guard |= ast.dump(x) != ast.dump(y)
+            elif not match(x, y):
+                return False
+        return True
+
+    return match(before, after) and changed_guard
 
 
 class ExecutionIndex:
@@ -169,7 +236,7 @@ class ExecutionIndex:
     def baseline(source, path):
         return compile(source, path, "exec", dont_inherit=True)
 
-    def select(self, path, source, tree, *, local_substitutions_only=False):
+    def select(self, path, source, tree, *, local_substitutions_only=False, original_tree=None):
         if not self.complete or path not in self.files or not path.startswith("sqlglot/"):
             return None
         try:
@@ -180,7 +247,8 @@ class ExecutionIndex:
         for old, new in changed:
             if old.co_flags & (0x20 | 0x80 | 0x200):
                 return None
-            if local_substitutions_only and (not self.compatible or not scalar_replacements(old, new)):
+            if local_substitutions_only and (not self.compatible or not (scalar_replacements(old, new)
+                    or only_local_conditions(original_tree, tree, old, new))):
                 # New calls, stores and control flow can introduce unmeasured
                 # interactions between modules or tests.
                 return None

@@ -29,6 +29,8 @@ An earlier ten-patch holdout combined six changes to parser and generator functi
 
 Ten further patches combined edits to different source files or test modules. The full suite produced 81 failing test/patch pairs. The current schedules included all 81 in 63.611 simulated seconds, compared with 368.170 for `f402de9`. Including selector CPU, the matched totals were 69.474 and 370.842 seconds. A separate eight-patch batch changed declarations and function bodies within the same file. Its schedules cost 79.725 simulated seconds, compared with 294.536 for `f402de9`.
 
+In an eight-patch holdout pairing local guard or membership edits with a second production change, all 18 failing test/patch pairs were selected. On x86 Linux the schedule fell from 294.536 simulated seconds at `bda301ad` to 43.133. The organizer score including container CPU fell from 311.493 to 113.879 seconds in this local emulation. Three additional edits to shared functions produced five further failing pairs, all included.
+
 ## How it chooses tests
 
 - The baseline maps record test-specific source lines, bytecode blocks and files read. A second run executes each of the 1,620 tests in its own process tree to measure imports and fixture dependencies, including Python subprocesses.
@@ -43,6 +45,7 @@ Ten further patches combined edits to different source files or test modules. Th
 - A literal or operator change inside an existing, undecorated test function retains all tests in its module, along with every other test whose isolated process imported or read that module. Changes to collection, fixtures and shared test helpers use the full suite.
 - The longest executor tests contain independent TPC queries. When a function-body edit touches a recorded query phase, the selector can run that phase on the patched source and compare its output with the pinned result. The worker has a bounded CPU and wall-time allowance.
 - For short schedules the selector can run the selected pytest cases on a private copy of the changed paths. For longer schedules it can confirm a single test when its measured runtime is sufficiently below the schedule time it could save. A test can be removed when its setup, body, subtests and teardown all pass. Timeouts keep the outstanding candidates.
+- For paired edits to local conditions, the selector compares the surrounding function syntax and keeps every observed caller when the instruction layout changes. A constant membership list may gain or lose values when the element type and membership operation are preserved.
 - Explicit readers of edited source and fixtures remain eligible. When a patch changes constants or operators in multiple functions, the selector identifies the first bytecode blocks where execution could differ. It combines their observed test sets across files and retains subprocess and cache consumers. Changes to lexical scope, eager execution or instruction structure use a broader schedule. IDs missing from the baseline inventory are always included.
 
 Existing workers take additional zero-duration tests. Shorter workers take related tests first, then other tests that fit the same integer-millisecond makespan.
