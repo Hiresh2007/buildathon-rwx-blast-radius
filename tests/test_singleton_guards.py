@@ -21,6 +21,19 @@ class GuardTests(unittest.TestCase):
             target.write_bytes(gzip.compress(json.dumps(data).encode()))
             return cls(target, data["ids"])
 
+    def test_mixed_component_requires_passive_equality_for_every_observed_type(self):
+        path = "sqlglot/example.py"
+        code = "def f(value):\n    if value is None:\n        return 1\n"
+        source = Source(code, path)
+        candidate = ast.parse(code.replace("is None", "== None"))
+        some_custom = self.observations(NoneComparisons, path, [2, "2f", "04", "00"])
+        self.assertEqual(some_custom.exemptions(path, source, candidate, {2}, set(), fully_passive=True), 0)
+        all_passive = self.observations(NoneComparisons, path, [2, "2f", "00", "04"])
+        self.assertEqual(all_passive.exemptions(path, source, candidate, {2}, set(), fully_passive=True),
+                         1 | 2 | 4 | 8)
+        with_second_edit = ast.parse(code.replace("is None", "== None").replace("return 1", "return 2"))
+        self.assertEqual(all_passive.exemptions(path, source, with_second_edit, {2}, set(), fully_passive=True), 0)
+
     def test_none_comparison_keeps_unknown_unseen_and_incomplete_cases(self):
         path = "sqlglot/example.py"
         code = "def f(value):\n    if value is None:\n        return 1\n"

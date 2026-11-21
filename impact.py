@@ -212,7 +212,7 @@ class ImpactIndex:
         here = Path(__file__).resolve().parent
         ids = map_data["ids"]
         self.execution = ExecutionIndex(_read_map("execution.json.gz"), ids, _read_map("children.json.gz"),
-                                        _read_map("import-blocks.json.gz"))
+                                        _read_map("import-blocks.json.gz"), _read_map("generators.json.gz"))
         self.symbols = SymbolIndex(_read_map("symbols.json.gz"), ids, self.root)
         self.domains = load_domains(here / "predicates.json.gz", ids)
         self.arguments = ArgumentIndex(here / "arguments.json.gz", ids)
@@ -459,7 +459,58 @@ def _test_module_change(change, index, prepared):
             | index.reads.get(path, 0) | index.execution.child_reads.get(path, 0))
 
 
-def _python_change(change, index, prepared):
+def _shifted_class_coverage(change, source, tree, index, *, combined=False):
+    # A line-number-only class prologue can invalidate a worker's eager-code
+    # check after an insertion in an earlier function. Keep every consumer
+    # of that file, class, raw namespace, and dependent initialization.
+    if _balanced_replacements(change.hunks):
+        return None
+
+    def class_lines(root, prefix=""):
+        for node in root.body:
+            if isinstance(node, ast.ClassDef):
+                name = prefix + node.name
+                yield name, node.lineno
+                yield from class_lines(node, name + ".")
+
+    before, after = dict(class_lines(source.tree)), dict(class_lines(tree))
+    shifted = {name for name in before.keys() & after.keys() if before[name] != after[name]}
+    if not shifted:
+        return None
+    scope_bits = index.execution.select(change.path, source.text, tree, class_origins=shifted,
+                                        local_substitutions_only=combined, original_tree=source.tree)
+    if scope_bits is None:
+        return None
+    module = change.path[:-3].replace("/", ".").removesuffix(".__init__")
+    bits = (scope_bits | index.isolated.get(change.path, index.all_bits) | index.unknown
+            | index.symbols.modules.get(module, 0) | index.reads.get(change.path, 0)
+            | index.execution.child_reads.get(change.path, 0))
+    for mask in index.files.get(change.path, {}).values():
+        bits |= mask
+    prefixes = tuple(f"{module}:{name}." for name in shifted)
+    closure = {name for name in index.symbols.declared if name.startswith(prefixes)}
+    pending = list(closure)
+    while pending:
+        for derived in index.symbols.derived.get(pending.pop(), ()):
+            if derived not in closure:
+                closure.add(derived)
+                pending.append(derived)
+    initializing = set()
+    for name in closure:
+        bits |= index.symbols.raw.get(name, 0) | index.symbols.copies.get(name, 0)
+        for mask in index.symbols.keys.get(name, {}).values():
+            bits |= mask
+        initializing.update(index.symbols.initialized.get(name, ()))
+        for modules in index.symbols.initialized_keys.get(name, {}).values():
+            initializing.update(modules)
+    for other in initializing:
+        prefix = other.replace(".", "/")
+        bits |= (index.symbols.modules.get(other, index.all_bits) | index.isolated.get(prefix + ".py", 0)
+                 | index.isolated.get(prefix + "/__init__.py", 0))
+    return bits
+
+
+def _python_change(change, index, prepared, *, passive_exempt=None):
     source, changed, tree, replaced, inserted = prepared
     reads = index.reads.get(change.path, 0)
     # A test whose subprocess escaped the whole-suite tracer is still represented
@@ -469,7 +520,7 @@ def _python_change(change, index, prepared):
     line_bits = index.all_bits
     if _balanced_replacements(change.hunks):
         line_bits = _line_change(change.path, source, replaced, inserted, index)
-    execution_bits = index.execution.select(change.path, source.text, tree)
+    execution_bits = index.execution.select(change.path, source.text, tree, original_tree=source.tree)
     if execution_bits is not None:
         # Main-process line coverage cannot rule out a call observed only in a child.
         line_bits = (line_bits & execution_bits) | (execution_bits & index.execution.child_complete)
@@ -485,10 +536,16 @@ def _python_change(change, index, prepared):
             # Never mutate the cached or candidate ASTs used by the other analyses.
             if not _same_outside_scopes(source.text, ast.parse(changed), scopes):
                 line_bits = index.all_bits
-        if line_bits == index.all_bits:
+        if line_bits == index.all_bits and passive_exempt is None:
             symbols = index.symbols.select(change.path, source.tree, tree, source.text, changed)
             if symbols is not None:
                 line_bits = symbols
+            else:
+                origin = _shifted_class_coverage(change, source, tree, index)
+                if origin is not None:
+                    return origin | reads | partial
+    if passive_exempt is not None:
+        return (line_bits & ~(passive_exempt & ~index.execution.untraced)) | reads | partial
     exempt = exemptions(change.path, source.tree, tree, index.domains, replaced, inserted)
     exempt |= index.arguments.exemptions(change.path, source.tree, tree, replaced, inserted)
     exempt |= index.lookups.exemptions(change.path, source, tree, replaced, inserted) & ~index.execution.untraced
@@ -576,13 +633,23 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
                 # reach a modified instruction, load a changed configuration
                 # value, or omit a changed function argument. Use the union of
                 # these observations, retaining child and cache consumers.
-                # Operand-specific exemptions for independent edits cannot be
-                # combined: a value changed upstream may reach either function.
-                source, _, tree, _, _ = prepared
+                source, _, tree, replaced, inserted = prepared
+                # The first differing value must arise in one of the edits. A
+                # globally passive comparison preserves the value and does not
+                # invoke custom code. The other components retain all their
+                # reachable edits, including an upstream change in operand type.
+                passive = index.none_comparisons.exemptions(
+                    change.path, source, tree, replaced, inserted, fully_passive=True
+                )
+                if passive:
+                    bits |= _python_change(change, index, prepared, passive_exempt=passive) | cache_bits
+                    continue
                 calls = index.execution.select(change.path, source.text, tree, local_substitutions_only=True,
                                                original_tree=source.tree)
                 if calls is None:
-                    return set(index.all)
+                    calls = _shifted_class_coverage(change, source, tree, index, combined=True)
+                    if calls is None:
+                        return set(index.all)
                 cold = index.isolated.get(change.path, 0) | index.unknown
                 partial = index.incomplete & cold & ~index.execution.child_complete
                 bits |= (calls | cache_bits | partial | index.reads.get(change.path, 0)

@@ -81,14 +81,31 @@ class ScopeChange(Exception):
     """A lexical change can affect a call before the edited statement runs."""
 
 
-def changes(old, new):
+def class_origin_only(old, new):
+    """Identify CPython's compiler-generated __firstlineno__ class prologue."""
+    if (old.co_flags & 1 or old.co_name == "<module>" or old.co_firstlineno == new.co_firstlineno
+            or old.co_code != new.co_code or old.co_names != new.co_names
+            or old.co_exceptiontable != new.co_exceptiontable):
+        return False
+    before, a = instructions(old)
+    after, b = instructions(new)
+    changed = [i for i, (left, right) in enumerate(zip(a, b)) if left != right]
+    if len(a) != len(b) or len(changed) != 1:
+        return False
+    i = changed[0]
+    return (i + 1 < len(a) and before[i].opname == "LOAD_CONST"
+            and before[i].argval == old.co_firstlineno and after[i].argval == new.co_firstlineno
+            and before[i + 1].opname == "STORE_NAME" and before[i + 1].argval == "__firstlineno__")
+
+
+def changes(old, new, *, class_origins=False):
     """List changed deferred code, or reject a change to import/class execution."""
     children_old = [c for c in old.co_consts if isinstance(c, types.CodeType)]
     children_new = [c for c in new.co_consts if isinstance(c, types.CodeType)]
     if len(children_old) != len(children_new):
         raise ScopeChange("changed definition layout")
     changed = []
-    if signature(old) != signature(new):
+    if signature(old) != signature(new) and not (class_origins and old.co_qualname in class_origins and class_origin_only(old, new)):
         # Class and module bodies run eagerly. A function's signature and docstring
         # are also observable without calling it.
         if structure(old) != structure(new):
@@ -102,7 +119,7 @@ def changes(old, new):
     for before, after in zip(children_old, children_new):
         if before.co_qualname != after.co_qualname:
             raise ScopeChange("changed function name")
-        changed.extend(changes(before, after))
+        changed.extend(changes(before, after, class_origins=class_origins))
     return changed
 
 
@@ -327,7 +344,7 @@ def guarded_returns_only(original, candidate, old, new):
 
 
 class ExecutionIndex:
-    def __init__(self, data, ids, children, import_blocks=None):
+    def __init__(self, data, ids, children, import_blocks=None, generators=None):
         if data["ids"] != ids:
             raise ValueError("execution map uses another test inventory")
         self.complete = data["complete"]
@@ -335,6 +352,15 @@ class ExecutionIndex:
         self.masks = [int(encoded, 16) for encoded in data["sets"]]
         self.untraced = self.masks[data["untraced"]]
         self.compatible = data["python"] == sys.implementation.cache_tag
+        self.generator_files = {}
+        self.generator_masks = []
+        self.generator_untraced = 0
+        if (generators and generators["complete"] and generators["ids"] == ids
+                and generators["python"] == sys.implementation.cache_tag and generators["platform"] == sys.platform
+                and generators.get("machine") == platform.machine()):
+            self.generator_files = generators["files"]
+            self.generator_masks = [int(encoded, 16) for encoded in generators["sets"]]
+            self.generator_untraced = self.generator_masks[generators["untraced"]]
         self.import_blocks = {}
         if (import_blocks and import_blocks["python"] == sys.implementation.cache_tag
                 and import_blocks["platform"] == sys.platform and import_blocks.get("machine") == platform.machine()):
@@ -351,16 +377,20 @@ class ExecutionIndex:
     def baseline(source, path):
         return compile(source, path, "exec", dont_inherit=True)
 
-    def select(self, path, source, tree, *, local_substitutions_only=False, original_tree=None):
+    def select(self, path, source, tree, *, local_substitutions_only=False, original_tree=None, class_origins=False):
         if not self.complete or path not in self.files or not path.startswith("sqlglot/"):
             return None
         try:
-            changed = changes(self.baseline(source, path), compile(tree, path, "exec", dont_inherit=True))
+            changed = changes(self.baseline(source, path), compile(tree, path, "exec", dont_inherit=True), class_origins=class_origins)
         except (ValueError, RecursionError):
             return None
         selected = self.untraced & ~self.child_complete
         for old, new in changed:
-            if old.co_flags & (0x20 | 0x80 | 0x200):
+            if old.co_flags & (0x80 | 0x200):
+                return None
+            generator = bool(old.co_flags & 0x20)
+            if generator and not (scalar_replacements(old, new)
+                    or only_local_conditions(original_tree, tree, old, new)):
                 return None
             if local_substitutions_only and (not self.compatible or not (scalar_replacements(old, new)
                     or only_local_conditions(original_tree, tree, old, new)
@@ -370,18 +400,29 @@ class ExecutionIndex:
                 return None
             name = scope_name(old)
             selected |= self.child_calls.get(f"{path}|{name}", 0)
-            record = self.files[path].get(name)
+            masks = self.masks
+            if generator:
+                record = self.generator_files.get(path, {}).get(name)
+                if not record:
+                    return None
+                masks = self.generator_masks
+                selected |= self.generator_untraced & ~self.child_complete
+            else:
+                record = self.files[path].get(name)
             if record is None:
                 # Only the measured interpreter can distinguish a never-called scope
                 # from a scope the compiler emitted under another name.
                 if not self.compatible:
                     return None
                 continue
-            early, calls, fingerprint, blocks = record
-            first = self.import_blocks.get(path, {}).get(name) if early else None
+            early, calls, fingerprint, blocks = record[:4]
+            if generator:
+                first = [fingerprint, record[4]] if early and record[4] else None
+            else:
+                first = self.import_blocks.get(path, {}).get(name) if early else None
             if early and (not first or first[0] != fingerprint):
                 return None
-            possible = self.masks[calls]
+            possible = masks[calls]
             localized = False
             if (possible or early) and self.compatible and bytecode_key(old) == fingerprint:
                 before, a = instructions(old)
@@ -396,7 +437,7 @@ class ExecutionIndex:
                     if early and not touched.isdisjoint(first[1]):
                         return None
                     localized = True
-                    block_masks = {offset: self.masks[m] for offset, m in blocks}
+                    block_masks = {offset: masks[m] for offset, m in blocks}
                     possible = 0
                     for offset in touched:
                         possible |= block_masks.get(offset, 0)

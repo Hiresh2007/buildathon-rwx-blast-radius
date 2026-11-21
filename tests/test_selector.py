@@ -176,6 +176,23 @@ class PinnedSourceTests(unittest.TestCase):
         self.assertNotEqual(new, old)
         self.assertEqual(choose_tests(patch(name, old, new), self.index), self.index.all)
 
+    def test_passive_component_keeps_the_original_callers_of_the_second_edit(self):
+        generator = "sqlglot/generator.py"
+        parser = "sqlglot/parsers/duckdb.py"
+        original_guard = self.index.source(generator).text
+        original_parser = self.index.source(parser).text
+        guard = patch(generator, original_guard, original_guard.replace(
+            "if visible is not None:", "if visible != None:", 1))
+        call = patch(parser, original_parser, original_parser.replace(
+            "self._parse_alias(self._parse_primary_or_var(), explicit=True)",
+            "self._parse_alias(self._parse_primary_or_var(), explicit=False)", 1))
+        self.assertTrue(guard and call)
+        affected = choose_tests(call, self.index)
+        combined = choose_tests(guard + call, self.index)
+        self.assertTrue(affected.issubset(combined))
+        self.assertIn(self.unknown, combined)
+        self.assertLess(len(combined), len(self.index.all))
+
     def test_multiple_semantic_files(self):
         change = ''
         for name in ['sqlglot/helper.py', 'sqlglot/tokens.py']:

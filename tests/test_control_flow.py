@@ -2,7 +2,7 @@ import ast
 import unittest
 from types import CodeType
 
-from execution import first_changed_blocks, guarded_returns_only, instructions
+from execution import changes, first_changed_blocks, guarded_returns_only, instructions
 
 
 def scope(text):
@@ -39,6 +39,18 @@ class ControlFlowTests(unittest.TestCase):
         new_tree, new_code = scope(new)
         self.assertFalse(guarded_returns_only(tree, new_tree, code, new_code))
         self.assertEqual(touched_lines(old, new), {3})
+
+    def test_class_origin_can_move_without_exempting_its_body(self):
+        source = "def choose(value):\n    return value\nclass C:\n    label = 41\n"
+        shifted = source.replace("    return value", "    if value is None:\n        return 0\n    return value")
+        original = compile(source, "module.py", "exec")
+        changed = compile(shifted, "module.py", "exec")
+        with self.assertRaises(ValueError):
+            changes(original, changed)
+        deferred = changes(original, changed, class_origins={"C"})
+        self.assertEqual([old.co_qualname for old, _ in deferred], ["choose"])
+        with self.assertRaises(ValueError):
+            changes(original, compile(shifted.replace("label = 41", "label = 42"), "module.py", "exec"), class_origins={"C"})
 
     def test_shared_target_after_loop_is_compared(self):
         old = 'def render(numbers):\n    for x in numbers:\n        if x:\n            break\n    return 1\n'

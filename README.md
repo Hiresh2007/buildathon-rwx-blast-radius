@@ -41,11 +41,17 @@ We selected 16 single-file changes to frequently executed or randomly sampled co
 
 Eight independent insertions in nested branches and four multi-file changes were each run against all 1,620 tests. They produced 1,132 and 2,486 failing patch/test pairs. Compared with `683d49a`, the matched x86 Linux schedules using the measured Linux import map fell from 240.409 to 124.630 seconds and from 147.268 to 114.240 seconds. Every failing pair was selected. The Linux map in this comparison came from the full suite on ARM. The image rebuilds the map for its target architecture. With an incomplete target profile, the two x86 cohorts took 194.252 and 147.268 seconds, again with zero misses. The 30-patch native public fixture stayed at 97.282 seconds with zero missed patches.
 
+Four class-line shifts and six changes combining ordinary generator edits with another source change ran against all 1,620 tests. The matched native schedules included all 24 and 19 failing pairs and fell from 147.268 to 83.761 seconds and from 220.902 to 149.774 seconds. On the eight structural edits above, the integrated selector took 115.267 seconds and included all 1,132 failing pairs. Its four mixed edits took 114.240 seconds and included all 2,486 pairs. The 30-patch independent cohort stayed at 224.914 seconds with every failing pair covered.
+
+The joint collector passed all 1,620 tests and 25,440 subtests on macOS and native ARM Linux. Their 1,838 import records and 282 generator records agreed on the compatible bytecode, blocks and test masks. The image measures its own platform and architecture at build time.
+
 ## How it chooses tests
 
 - The baseline maps record test-specific source lines, bytecode blocks and files read. A second run executes each of the 1,620 tests in its own process tree to measure imports and fixture dependencies, including Python subprocesses.
 - Function edits are checked against compiled scopes and measured blocks. For eligible configuration edits, the selector imports the candidate in an isolated process and compares values with the baseline, including derived class fields and reads of individual dictionary keys.
 - When an edit changes instruction count, the selector follows the original and revised control-flow graphs until their instructions or exception behavior first differ. It uses the original blocks reached by each test. For functions executed at import time, the image collects which blocks ran during collection or lazy imports. Interrupted or unsuccessful build-time profiles retain the broader import coverage.
+- For synchronous generators, the trace records the blocks reached when a generator starts, resumes or receives an exception. Tests using an unobserved process remain eligible. If a function insertion moves a later class, the selector recognizes CPython’s generated class line-number assignment and retains file importers, class consumers, raw-namespace readers and dependent module initializers.
+- In mixed changes, a comparison with `None` can use its operand trace when every observed type preserves ordinary equality semantics. The schedule still includes the callers of each other edit and all unmeasured readers.
 - For edits to shared cache builders, later readers of a cached value are retained even when another test originally filled the cache.
 - For required and optional expression arguments, the selector traces the validator’s actual inputs and checks which tests observe a missing key. Tests that inspect the schema directly remain eligible.
 - For simple comparisons and local boolean guards, the selector can rule out a test when every observed operand yields the same result before and after the edit. Unmeasured values keep the candidate.
@@ -80,7 +86,7 @@ export PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 "$PY" tools/build_cache_consumers.py "$SRC" cache-consumers.json.gz
 "$PY" tools/profile_pivots.py "$SRC" "$TESTS" pivot-times.json.gz
 "$PY" tools/build_execution.py "$SRC" "$TESTS" execution.json.gz
-"$PY" tools/build_import_blocks.py "$SRC" "$TESTS" import-blocks.json.gz
+"$PY" tools/build_import_blocks.py "$SRC" "$TESTS" import-blocks.json.gz generators.json.gz
 "$PY" tools/build_children.py "$SRC" coverage.json.gz children.json.gz
 "$PY" tools/build_arguments.py "$SRC" "$TESTS" arguments.json.gz
 "$PY" tools/build_dependencies.py "$SRC" "$TESTS" dependencies.json.gz --jobs 3

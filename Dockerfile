@@ -17,8 +17,8 @@ RUN python -I -B -S symbols.py --build-baseline /opt/sqlglot symbols.json.gz sym
 
 COPY tools/build_import_blocks.py tools/build_execution.py tools/build_map.py /tmp/rwx_import_profile/
 RUN PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-    python /tmp/rwx_import_profile/build_import_blocks.py /opt/sqlglot coverage.json.gz import-blocks.json.gz --build-budget 330 \
-    && chmod 644 import-blocks.json.gz
+    python /tmp/rwx_import_profile/build_import_blocks.py /opt/sqlglot coverage.json.gz import-blocks.json.gz generators.json.gz --build-budget 330 \
+    && chmod 644 import-blocks.json.gz generators.json.gz
 
 ENV PYTHONDONTWRITEBYTECODE=1 SQLGLOT_ROOT=/opt/sqlglot
 USER 65534:65534

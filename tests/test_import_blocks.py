@@ -8,6 +8,27 @@ from execution import ExecutionIndex, block_starts, bytecode_key, instructions, 
 
 
 class ImportBlocksTests(unittest.TestCase):
+    def test_resumed_generator_selects_later_consumers_and_untraced_tests(self):
+        path = "sqlglot/example.py"
+        source = "def sequence(flag):\n    yield 1\n    if flag:\n        yield 2\n"
+        tree = ast.parse(source.replace("yield 2", "yield 3"))
+        code = compile(source, path, "exec", dont_inherit=True).co_consts[0]
+        starts = block_starts(code)
+        load = next(op for op in instructions(code)[0] if op.opname == "LOAD_CONST" and op.argval == 2)
+        leader = starts[bisect.bisect_right(starts, load.offset) - 1]
+        ids = ["first", "resumed", "untraced"]
+        data = {"ids": ids, "python": sys.implementation.cache_tag, "complete": True,
+                "sets": ["0", "1", "2", "3", "4"], "untraced": 4, "files": {path: {}}}
+        generator = {**data, "platform": sys.platform, "machine": platform.machine(),
+                     "files": {path: {scope_name(code): [False, 3, bytecode_key(code), [[leader, 2]], []]}}}
+        children = {"ids": ids, "python": sys.implementation.cache_tag, "platform": sys.platform,
+                    "complete": "0", "scopes": {}, "reads": {}}
+        chosen = ExecutionIndex(data, ids, children, generators=generator)
+        self.assertEqual(chosen.select(path, source, tree), 2 | 4)
+        self.assertIsNone(ExecutionIndex(data, ids, children).select(path, source, tree))
+        generator["machine"] = "unmeasured architecture"
+        self.assertIsNone(ExecutionIndex(data, ids, children, generators=generator).select(path, source, tree))
+
     def test_only_the_original_changed_block_controls_the_import_fallback(self):
         path = "sqlglot/example.py"
         source = "def pick(flag):\n    return 1 if flag else 2\n"
