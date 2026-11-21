@@ -6,6 +6,13 @@ import gzip
 import json
 
 
+def string_collection(node):
+    if (isinstance(node, (ast.Tuple, ast.List, ast.Set)) and len(node.elts) <= 32
+            and all(isinstance(item, ast.Constant) and type(item.value) is str for item in node.elts)):
+        return frozenset(item.value for item in node.elts)
+    return None
+
+
 def lookup(node):
     if (
         isinstance(node, ast.Call)
@@ -26,6 +33,9 @@ def lookup(node):
         and type(node.left.value) is str
     ):
         return "membership", node.left
+    if (isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn))
+            and string_collection(node.comparators[0]) is not None):
+        return "literal_members", node.comparators[0]
     return None
 
 
@@ -34,13 +44,21 @@ def site(node, key):
 
 
 class LookupDomains:
-    def __init__(self, path, ids):
+    def __init__(self, path, ids, membership=None):
         with gzip.open(path, "rt") as stream:
             data = json.load(stream)
         if data["ids"] != ids:
             raise ValueError("lookup trace uses another inventory")
         self.complete = int(data["complete"], 16)
         self.files = data["files"]
+        if membership is not None:
+            with gzip.open(membership, "rt") as stream:
+                extra = json.load(stream)
+            if extra["ids"] != ids:
+                raise ValueError("membership trace uses another inventory")
+            self.complete &= int(extra["complete"], 16)
+            for name, locations in extra["files"].items():
+                self.files.setdefault(name, {}).update(locations)
         self.lines = {}
         for name, locations in self.files.items():
             self.lines[name] = set()
@@ -72,6 +90,21 @@ class LookupDomains:
             old = edits.get(tag)
             if old is None or lookup(old)[0] != kind:
                 continue
+            if kind == "literal_members":
+                before = old.comparators[0]
+                changed_keys = string_collection(before) ^ string_collection(key)
+                new.comparators[0] = before
+                try:
+                    if not same_syntax(candidate, source.tree):
+                        continue
+                finally:
+                    new.comparators[0] = key
+                seen, unknown, values = locations[tag]
+                safe = self.complete & seen & ~unknown
+                for needles, mask in values:
+                    if not needles.isdisjoint(changed_keys):
+                        safe &= ~mask
+                return safe
             before = lookup(old)[1].value
             after = key.value
             changed = key

@@ -75,7 +75,7 @@ class Rewrite(ast.NodeTransformer):
             or (
                 isinstance(use, ast.Call)
                 and isinstance(use.func, ast.Name)
-                and use.func.id in ("bool", "len")
+                and use.func.id == "bool"
                 and len(use.args) == 1
                 and not use.keywords
             )
@@ -86,14 +86,16 @@ class Rewrite(ast.NodeTransformer):
                 and isinstance(owner.ops[0], (ast.In, ast.NotIn))
                 and owner.comparators[0] is node
             )
-            or (
-                isinstance(owner, ast.Attribute)
-                and owner.attr == "keys"
-                and isinstance(self.parents.get(owner), ast.Call)
-                and self.parents[owner].func is owner
-            )
         ):
             return self.generic_visit(node)
+        if (
+            isinstance(owner, ast.Attribute) and owner.attr == "keys"
+            and isinstance(self.parents.get(owner), ast.Call) and self.parents[owner].func is owner
+        ) or (
+            isinstance(owner, ast.Call) and isinstance(owner.func, ast.Name)
+            and owner.func.id == "len" and len(owner.args) == 1 and not owner.keywords
+        ):
+            return ast.copy_location(call("shape", self.generic_visit(node)), node)
         # Only these audited direct constructors can store a supplied dict for later lookups.
         if (
             isinstance(owner, ast.keyword)
@@ -144,6 +146,16 @@ class Rewrite(ast.NodeTransformer):
             and node.attr in self.trace.names
         )
 
+    def visit_Compare(self, node):
+        if (len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn))
+                and self.tracked(node.comparators[0])):
+            # The membership needle must be evaluated before the container.
+            tested = call("contains", self.visit(node.left), self.visit(node.comparators[0]))
+            if isinstance(node.ops[0], ast.NotIn):
+                tested = ast.UnaryOp(ast.Not(), tested)
+            return ast.copy_location(tested, node)
+        return self.generic_visit(node)
+
     def visit_Subscript(self, node):
         if (
             self.tracked(node.value)
@@ -188,6 +200,8 @@ class Trace(TestTrace):
         self.tables = {}
         self.raw_masks = {}
         self.keys = {}
+        self.shapes = {}
+        self.members = {}
         self.importing = 0
         self.everyone = (1 << len(self.ids)) - 1
         tokenizer = ast.parse((root / "sqlglot/tokens.py").read_bytes())
@@ -244,6 +258,23 @@ class Trace(TestTrace):
         if known is not None:
             self.mark(known[1])
         return value
+
+    def shape(self, value):
+        known = self.tables.get(id(value))
+        if known is not None:
+            site = known[1]
+            self.shapes[site] = self.shapes.get(site, 0) | self.mask()
+        return value
+
+    def contains(self, key, value):
+        match = self.tables.get(id(value))
+        if match is not None:
+            if type(key) is str:
+                seen = self.members.setdefault(match[1], {})
+                seen[key] = seen.get(key, 0) | self.mask()
+            else:
+                self.shape(value)
+        return key in value
 
     def accessed(self, site, key):
         if type(key) is not str:
@@ -315,7 +346,7 @@ class Trace(TestTrace):
             stack.enter_context(patch.object(loader, "get_code", get_code))
             stack.enter_context(patch.object(loader, "exec_module", execute))
             stack.enter_context(patch.object(concurrent.futures, "ProcessPoolExecutor", TracedPool))
-            for name in ("define", "namespace", "reflection", "raw", "item", "get"):
+            for name in ("define", "namespace", "reflection", "raw", "item", "get", "shape", "contains"):
                 stack.enter_context(
                     patch.object(builtins, "_rwx_table_" + name, getattr(self, name), create=True)
                 )
@@ -332,6 +363,8 @@ class Trace(TestTrace):
                 files.setdefault(path, {})[name] = (
                     format(raw, "x"),
                     {k: format(m, "x") for k, m in self.keys[site].items()},
+                    format(self.shapes.get(site, 0), "x"),
+                    {k: format(m, "x") for k, m in self.members.get(site, {}).items()},
                 )
         record = dict(
             ids=self.ids,

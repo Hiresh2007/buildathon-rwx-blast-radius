@@ -27,7 +27,7 @@ class Calls(ast.NodeTransformer):
 
     def visit(self, node):
         desc = lookup(node)
-        if not desc:
+        if not desc or (desc[0] == "literal_members") != self.trace.only_members:
             return super().visit(node)
         kind, key = desc
         tag = (self.path, site(node, key))
@@ -47,13 +47,14 @@ class Calls(ast.NodeTransformer):
                 node.comparators[0],
                 ast.Constant(isinstance(node.ops[0], ast.NotIn)),
             ]
-            name = "_rwx_record_membership"
+            name = "_rwx_record_needle" if kind == "literal_members" else "_rwx_record_membership"
         return ast.copy_location(ast.Call(ast.Name(name, ast.Load()), args, []), node)
 
 
 class Trace(TestTrace):
-    def __init__(self, source, tests):
+    def __init__(self, source, tests, only_members=False):
         super().__init__(source, tests)
+        self.only_members = only_members
         self.everyone = (1 << len(self.ids)) - 1
         self.registry = {}
         self.records = []
@@ -94,6 +95,10 @@ class Trace(TestTrace):
         self.record(number, container if type(container) in (dict, set, frozenset, tuple, list) else None)
         return key not in container if negate else key in container
 
+    def needle(self, number, key, container, negate):
+        self.record(number, (key,) if type(key) is str else None)
+        return key not in container if negate else key in container
+
     def collect(self):
         loader = importlib.machinery.SourceFileLoader
         get_code, execute = loader.get_code, loader.exec_module
@@ -119,6 +124,7 @@ class Trace(TestTrace):
             patch.object(loader, "exec_module", load),
             patch.object(builtins, "_rwx_record_get", self.get, create=True),
             patch.object(builtins, "_rwx_record_membership", self.membership, create=True),
+            patch.object(builtins, "_rwx_record_needle", self.needle, create=True),
             patch.object(concurrent.futures, "ProcessPoolExecutor", TracedPool),
         ):
             return pytest.main(["tests", "-q", "--assert=plain", "-p", "no:cacheprovider"], plugins=[self])
@@ -147,9 +153,10 @@ if __name__ == "__main__":
     args = argparse.ArgumentParser(description=__doc__)
     for name in ("source", "tests_json", "output"):
         args.add_argument(name, type=Path)
+    args.add_argument("--literal-members", action="store_true")
     args = args.parse_args()
     root, output = args.source.resolve(), args.output.resolve()
-    trace = Trace(root, json.loads(args.tests_json.read_bytes())["tests"])
+    trace = Trace(root, json.loads(args.tests_json.read_bytes())["tests"], args.literal_members)
     os.chdir(root)
     sys.path.insert(0, str(root))
     os.environ.update(

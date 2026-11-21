@@ -215,7 +215,7 @@ class ImpactIndex:
         self.arguments = ArgumentIndex(here / "arguments.json.gz", ids)
         self.defaults = DefaultIndex(here / "default-impact.json.gz", ids)
         self.table_values = TableValues(here / "table-values.json.gz", ids)
-        self.lookups = LookupDomains(here / "lookup-domains.json.gz", ids)
+        self.lookups = LookupDomains(here / "lookup-domains.json.gz", ids, here / "membership-values.json.gz")
         deps = _read_map("dependencies.json.gz")
         if deps["ids"] != ids:
             raise ValueError("isolated test map uses another inventory")
@@ -425,7 +425,7 @@ def _declaration_change(change, index, prepared, *, combined=False):
         cold = index.isolated.get(change.path, index.all_bits) | index.unknown
         return (setting | index.reads.get(change.path, 0) | index.execution.child_reads.get(change.path, 0)
                 | (cold & index.incomplete))
-    table = index.table_values.select(change.path, source, tree, replaced, inserted, index)
+    table = index.table_values.select(change.path, source, tree, replaced, inserted, index, allow_shape=combined)
     if table is not None:
         return table
     return index.defaults.select(change.path, source, tree, replaced, inserted, index, combined=combined)

@@ -60,6 +60,20 @@ class OperandTests(unittest.TestCase):
             path.write_bytes(gzip.compress(json.dumps(records).encode()))
             return cls(path, records["ids"])
 
+    def test_literal_membership_keeps_changed_and_unobserved_needles(self):
+        path = 'sqlglot/sample.py'
+        src = Source('def f(x):\n    return x in ("a", "b", "d")\n', path)
+        expression = src.tree.body[0].body[0].value
+        _, operand = lookup(expression)
+        tag = site(expression, operand)
+        data = {'ids': list('abcde'), 'complete': '1f', 'files': {path: {
+            tag: [2, '0f', '08', [[['unrelated'], '1'], [['b'], '2'], [['c'], '4']]]}}}
+        domains = self.load(LookupDomains, data)
+        edit = src.text.replace('("a", "b", "d")', '("b", "c")')
+        self.assertEqual(domains.exemptions(path, src, ast.parse(edit), {2}, set()), 3)
+        self.assertEqual(domains.exemptions(path, src, ast.parse(edit.replace('x in', 'x not in')), {2}, set()), 0)
+        self.assertEqual(domains.exemptions(path, src, ast.parse(edit.replace('return x', 'return x.value')), {2}, set()), 0)
+
     def test_absent_dictionary_key_requires_all_observations(self):
         src = Source('def f(d):\n    return d.get("old", 7)\n', "sqlglot/sample.py")
         node = next(n for n in ast.walk(src.tree) if lookup(n))
@@ -107,6 +121,40 @@ class OperandTests(unittest.TestCase):
         candidate = ast.parse(src.text.replace("False", "True"))
         self.assertEqual(domain.select(path, src, candidate, {1}, set(), index), 5)
         self.assertEqual(domain.select(path, src, candidate, {1}, set(), index, combined=True), 7)
+
+    def test_inserted_table_key_keeps_misses_membership_and_shape_readers(self):
+        path = "sqlglot/sample.py"
+        src = Source('ITEMS = {\n    "existing": 1,\n}\n', path)
+        data = {"ids":list("abcdef"), "complete":"3f", "files":{path:{"ITEMS":[
+            "1", {"existing":"2", "new":"4"}, "8", {"new":"10", "unrelated":"20"}]}}}
+        domain = self.load(TableValues, data)
+        index = SimpleNamespace(all_bits=63, isolated={}, unknown=0, incomplete=0, reads={},
+                                execution=SimpleNamespace(child_reads={}))
+        addition = ast.parse(src.text.replace('}', '    "new": 2,\n}'))
+        self.assertEqual(domain.select(path, src, addition, set(), {2}, index, allow_shape=True), 1 | 4 | 8 | 16)
+        self.assertEqual(domain.select(path, src, ast.parse(src.text.replace(': 1', ': 2')), {2}, set(), index), 3)
+        self.assertIsNone(domain.select(path, src, addition, set(), {3}, index))
+
+    def test_table_presence_and_shape_observations_are_distinct_from_get(self):
+        from tools.build_table_values import Rewrite, Trace
+        trace = Trace.__new__(Trace)
+        path = 'sqlglot/sample.py'
+        trace.names = {'ITEMS'}
+        trace.definitions = {(path, 'ITEMS')}
+        trace.forward, trace.tables, trace.raw_masks = set(), {}, {}
+        trace.keys, trace.shapes, trace.members = {}, {}, {}
+        trace.active, trace.everyone, trace.importing, trace.collecting = 1, 15, 0, False
+        code = "ITEMS = {'a': 1}\nfound = 'new' not in ITEMS\ncount = len(ITEMS)\nkeys = ITEMS.keys()\nvalue = ITEMS.get('a')\n"
+        # Construction and visitation share the same AST nodes used by the parent map.
+        parsed = ast.parse(code)
+        tree = Rewrite(trace, path, parsed).visit(parsed)
+        ns = {'_rwx_table_' + n: getattr(trace, n) for n in ('define','contains','shape','get','raw')}
+        exec(compile(ast.fix_missing_locations(tree), path, 'exec'), ns)
+        self.assertEqual((ns['found'], ns['count'], list(ns['keys']), ns['value']), (True, 1, ['a'], 1))
+        site = path, 'ITEMS'
+        self.assertEqual(trace.keys[site], {'a': 1})
+        self.assertEqual(trace.members[site], {'new': 1})
+        self.assertEqual(trace.shapes[site], 1)
 
     def test_table_values_include_every_changed_key_and_whole_table_readers(self):
         path = "sqlglot/sample.py"

@@ -48,8 +48,8 @@ class TableValues:
         self.complete = int(data["complete"], 16)
         self.files = data["files"]
 
-    def select(self, path, source, candidate, replaced, inserted, index):
-        if inserted or not replaced or path not in self.files:
+    def select(self, path, source, candidate, replaced, inserted, index, *, allow_shape=False):
+        if not (replaced or inserted) or path not in self.files:
             return None
         current = self.files[path]
         originals = dict(declarations(source.tree))
@@ -57,13 +57,21 @@ class TableValues:
             if name not in current or name not in originals:
                 continue
             original = originals[name]
-            if not all(original.lineno <= n <= original.end_lineno for n in replaced):
+            if (not all(original.lineno <= n <= original.end_lineno for n in replaced)
+                    or not all(original.lineno <= n < original.end_lineno for n in inserted)):
                 continue
             before, after = entries(original.value), entries(revised.value)
-            if before is None or after is None or list(before) != list(after):
+            if before is None or after is None:
                 continue
-            keys = [key for key in before if constant(before[key]) != constant(after[key])]
-            if not keys or not all(immutable_shape(before[k], after[k]) for k in keys):
+            record = current[name]
+            changed_shape = list(before) != list(after)
+            if changed_shape and (not allow_shape or len(record) < 4):
+                continue
+            updated = {key for key in before.keys() & after.keys() if constant(before[key]) != constant(after[key])}
+            if not all(immutable_shape(before[key], after[key]) for key in updated):
+                continue
+            keys = updated | (before.keys() ^ after.keys())
+            if not keys and not changed_shape:
                 continue
             saved = revised.value
             revised.value = original.value
@@ -72,9 +80,13 @@ class TableValues:
                     continue
             finally:
                 revised.value = saved
-            whole, keyed = current[name]
+            whole, keyed = record[:2]
             cold = index.isolated.get(path, index.all_bits) | index.unknown
             selected = int(whole, 16) | ((~self.complete | index.incomplete) & cold)
+            if changed_shape:
+                selected |= int(record[2], 16)
+                for key in before.keys() ^ after.keys():
+                    selected |= int(record[3].get(key, "0"), 16)
             for key in keys:
                 selected |= int(keyed.get(key, "0"), 16)
             return selected | index.reads.get(path, 0) | index.execution.child_reads.get(path, 0)
