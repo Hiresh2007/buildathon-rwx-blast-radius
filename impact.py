@@ -8,11 +8,13 @@ import json
 import os
 import re
 from tokenize import detect_encoding
+from collections import deque
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from pathlib import Path, PurePosixPath
 
 from arguments import ArgumentIndex
+from ast_syntax import same_syntax
 from cache_impact import CacheConsumers
 from default_impact import DefaultIndex, functions
 from execution import ExecutionIndex, ScopeChange, changes as changed_scopes, scalar_replacements
@@ -146,21 +148,38 @@ def _decl_start(node):
     return min([node.lineno] + [dec.lineno for dec in getattr(node, "decorator_list", ())])
 
 
+def _statements(tree):
+    # Python expressions cannot contain statements. Preserve breadth-first order
+    # through handlers, match cases and all other containers of statements.
+    pending = deque([tree])
+    while pending:
+        for child in ast.iter_child_nodes(pending.popleft()):
+            if isinstance(child, ast.expr):
+                continue
+            if isinstance(child, ast.stmt):
+                yield child
+            pending.append(child)
+
+
 class Source:
     def __init__(self, text, path):
         self.text = text
         tree = ast.parse(text, filename=path)
         self.tree = tree
-        self.syntax = ast.dump(tree)
-        self.scopes = sorted(
-            (node for node in ast.walk(tree) if isinstance(node, (*_FUNCTIONS, ast.ClassDef))),
-            key=lambda node: (node.end_lineno - _decl_start(node), -node.lineno),
-        )
         # A statement's span includes its full multiline condition and continuation lines.
         self.statements = sorted(
-            (node for node in ast.walk(tree) if isinstance(node, ast.stmt)),
+            _statements(tree),
             key=lambda node: (node.end_lineno - node.lineno, -node.lineno),
         )
+
+        self.scopes = sorted(
+            (node for node in self.statements if isinstance(node, (*_FUNCTIONS, ast.ClassDef))),
+            key=lambda node: (node.end_lineno - _decl_start(node), -node.lineno),
+        )
+
+    @cached_property
+    def syntax(self):
+        return ast.dump(self.tree)
 
     def runtime_scope(self, line):
         for scope in self.scopes:
@@ -290,7 +309,7 @@ def _setting_change(path, source, candidate, replaced, inserted, index):
     # against multi-hunk edits to nearby class members, imports, or decorators.
     new[1].value = old_value
     try:
-        if ast.dump(candidate) == ast.dump(source.tree):
+        if same_syntax(candidate, source.tree):
             return bits
     finally:
         new[1].value = new_value
@@ -308,9 +327,9 @@ def _same_outside_scopes(source, candidate, scopes):
                 return self.generic_visit(node)
             visit_AsyncFunctionDef = visit_FunctionDef
 
-        return ast.dump(Skeleton().visit(tree))
+        return Skeleton().visit(tree)
 
-    return signature(ast.parse(source)) == signature(candidate)
+    return same_syntax(signature(ast.parse(source)), signature(candidate))
 
 
 def _balanced_replacements(hunks):
@@ -354,10 +373,6 @@ def _units(tree, prefix=()):
             yield path, (node.lineno, node.end_lineno, node)
 
 
-def _unit_syntax(value):
-    return tuple(map(ast.dump, value)) if isinstance(value, list) else ast.dump(value)
-
-
 def _replace_unit(root, path, value):
     # Copy just the list of statements on the path. Both input trees remain
     # available to the source cache and the individual declaration checks.
@@ -387,7 +402,7 @@ def _separate_declarations(change, prepared):
             continue
         if path not in revisions or type(before) is not type(revisions[path][2]):
             return [prepared]
-        if _unit_syntax(before) != _unit_syntax(revisions[path][2]):
+        if not same_syntax(before, revisions[path][2]):
             groups[path] = lines
     if not 2 <= len(groups) <= 4:
         return [prepared]
@@ -397,7 +412,7 @@ def _separate_declarations(change, prepared):
     restored = tree
     for path in groups:
         restored = _replace_unit(restored, path, originals[path][2])
-    if ast.dump(restored) != source.syntax:
+    if not same_syntax(restored, source.tree):
         return [prepared]
     return [(source, changed, _replace_unit(source.tree, path, revisions[path][2]), lines, set())
             for path, lines in groups.items()]
@@ -470,7 +485,7 @@ def _python_change(change, index, prepared):
             if symbols is not None:
                 line_bits = symbols
     exempt = exemptions(change.path, source.tree, tree, index.domains, replaced, inserted)
-    exempt |= index.arguments.exemptions(change.path, source.tree, tree, replaced, inserted, source.syntax)
+    exempt |= index.arguments.exemptions(change.path, source.tree, tree, replaced, inserted)
     exempt |= index.lookups.exemptions(change.path, source, tree, replaced, inserted) & ~index.execution.untraced
     return (line_bits & ~exempt) | reads | partial
 
@@ -519,7 +534,7 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
             if change.path.endswith(".py"):
                 prepared = _prepare_change(change, index)
                 baseline, _, candidate, _, _ = prepared
-                if baseline.syntax == ast.dump(candidate):
+                if same_syntax(baseline.tree, candidate):
                     bits |= index.reads.get(change.path, 0) | index.execution.child_reads.get(change.path, 0)
                 elif change.path.startswith("tests/"):
                     consumers = _test_module_change(change, index, prepared)

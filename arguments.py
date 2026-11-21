@@ -1,6 +1,7 @@
 """Select tests affected by a required/optional flag on a literal Expr argument schema."""
 
 import ast
+from ast_syntax import same_syntax
 import gzip
 import hashlib
 import json
@@ -92,7 +93,7 @@ class ArgumentIndex:
             original = revised.value
             revised.value = stmt.value
             try:
-                if syntax != ast.dump(new):
+                if not same_syntax(old, new):
                     continue
             finally:
                 revised.value = original

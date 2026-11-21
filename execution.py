@@ -1,6 +1,7 @@
 """Compare compiled functions against execution of the unmodified test suite."""
 
 import ast
+from ast_syntax import same_syntax
 import bisect
 import dis
 import hashlib
@@ -202,12 +203,12 @@ def only_local_conditions(original, candidate, old, new):
         if not isinstance(a, ast.AST):
             return constant(a) == constant(b)
         if a is not before and isinstance(a, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef, ast.Lambda)):
-            return ast.dump(a) == ast.dump(b)
+            return same_syntax(a, b)
         for field in a._fields:
             x, y = getattr(a, field), getattr(b, field)
             if (field == "test" and isinstance(a, (ast.If, ast.IfExp, ast.While))
                     and local_condition(x, local_names) and local_condition(y, local_names)):
-                changed_guard |= ast.dump(x) != ast.dump(y)
+                changed_guard |= not same_syntax(x, y)
             elif not match(x, y):
                 return False
         return True

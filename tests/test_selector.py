@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 import unittest
 
+from ast_syntax import same_syntax
 from execution import ExecutionIndex, ScopeChange, changes, only_local_conditions, scalar_replacements
-from impact import ImpactIndex, Source, _apply, _parse_diff, _separate_declarations, choose_tests
+from impact import ImpactIndex, Source, _apply, _parse_diff, _separate_declarations, _statements, choose_tests
 from selector import fill_slack, schedule
 
 
@@ -72,6 +73,30 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(scalar_replacements(code("return value + 1"), code("return value + 2")))
         self.assertFalse(scalar_replacements(code("return value + 1"), code("return len(value)")))
         self.assertFalse(scalar_replacements(code("return value + 1"), code("return value + 'x'")))
+
+    def test_statement_index_includes_handlers_and_match_cases(self):
+        source = """def example(value):
+    try:
+        match value:
+            case True:
+                return [x for x in (1, 2)]
+            case _:
+                pass
+    except ValueError:
+        raise
+    finally:
+        value = None
+"""
+        tree = ast.parse(source)
+        self.assertEqual(list(_statements(tree)), [node for node in ast.walk(tree) if isinstance(node, ast.stmt)])
+
+    def test_ast_comparison_preserves_constant_types_and_ignores_locations(self):
+        self.assertTrue(same_syntax(ast.parse('def f(x): return x + 1'),
+                                    ast.parse('\n\ndef f(x):\n    return x + 1\n')))
+        self.assertFalse(same_syntax(ast.Constant(True), ast.Constant(1)))
+        self.assertFalse(same_syntax(ast.Constant(-0.0), ast.Constant(0.0)))
+        self.assertFalse(same_syntax(ast.parse('def f(x): return x'), ast.parse('def f(y): return y')))
+        self.assertFalse(same_syntax(ast.parse('x = 1'), ast.parse('x = 1; x = 2')))
 
     def test_membership_operand_can_change_length(self):
         def code(expression):

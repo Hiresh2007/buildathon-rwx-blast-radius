@@ -1,6 +1,7 @@
 """Bounded replay of affected independent queries in expensive SQLGlot executor tests."""
 
 import ast
+from ast_syntax import same_syntax
 import gzip
 import importlib.abc
 import importlib.util
@@ -93,7 +94,7 @@ class QueryProbe:
                 if inserted or not replaced:
                     return selected
                 new_tree = ast.parse(candidate)
-                if ast.dump(source.tree) == ast.dump(new_tree):
+                if same_syntax(source.tree, new_tree):
                     continue
                 lines = self.lines.get(change.path, {})
                 functions = set()
@@ -116,8 +117,8 @@ class QueryProbe:
                     for node in ast.walk(tree):
                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (node.lineno, node.name) in functions:
                             node.body = [ast.Pass()]
-                    return ast.dump(tree)
-                if strip(new_tree) != strip(ast.parse(source.text)):
+                    return tree
+                if not same_syntax(strip(new_tree), strip(ast.parse(source.text))):
                     return selected
                 files[change.path] = candidate
         except (SyntaxError, ValueError, OSError, RecursionError):

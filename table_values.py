@@ -1,6 +1,7 @@
 """Select consumers of changed values in an otherwise identical literal configuration table."""
 
 import ast
+from ast_syntax import same_syntax
 import gzip
 import json
 
@@ -67,7 +68,7 @@ class TableValues:
             saved = revised.value
             revised.value = original.value
             try:
-                if ast.dump(candidate) != source.syntax:
+                if not same_syntax(candidate, source.tree):
                     continue
             finally:
                 revised.value = saved

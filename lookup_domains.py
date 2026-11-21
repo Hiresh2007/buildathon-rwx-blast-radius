@@ -1,6 +1,7 @@
 """Bounded observations of built-in keyed lookups in unchanged SQLGlot tests."""
 
 import ast
+from ast_syntax import same_syntax
 import gzip
 import json
 
@@ -93,7 +94,7 @@ class LookupDomains:
             original = changed.value
             changed.value = restore
             try:
-                if ast.dump(candidate) != source.syntax:
+                if not same_syntax(candidate, source.tree):
                     continue
             finally:
                 changed.value = original

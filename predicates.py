@@ -1,5 +1,6 @@
 """Baseline operand domains for identity, equality and ordering comparisons."""
 import ast
+from ast_syntax import same_syntax
 import enum
 import gzip
 import json
@@ -99,7 +100,7 @@ def edits(old, new):
         return None
     changes = []
     for previous, current in zip((old.left, old.comparators[0]), (new.left, new.comparators[0])):
-        if ast.dump(previous) == ast.dump(current):
+        if same_syntax(previous, current):
             changes.append(None)
         else:
             before, after = literal(previous), literal(current)
@@ -132,7 +133,7 @@ def changed_predicates(old, new, out):
             out.append((old, type(new.op).__name__, []))
             return True
     if isinstance(old, ast.Compare):
-        if ast.dump(old) == ast.dump(new):
+        if same_syntax(old, new):
             return True
         edit = edits(old, new)
         if edit is not None:

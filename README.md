@@ -31,6 +31,8 @@ Ten further patches combined edits to different source files or test modules. Th
 
 In an eight-patch holdout pairing local guard or membership edits with a second production change, all 18 failing test/patch pairs were selected. On x86 Linux the schedule fell from 294.536 simulated seconds at `bda301ad` to 43.133. The organizer score including container CPU fell from 311.493 to 113.879 seconds in this local emulation. Three additional edits to shared functions produced five further failing pairs, all included.
 
+A subsequent syntax-comparison change produced identical candidate and protected test sets for 123 public and independently generated patches. Across twelve local runs, static analysis consumed 15.026 CPU seconds compared with 23.196 for the guard-aware selector.
+
 ## How it chooses tests
 
 - The baseline maps record test-specific source lines, bytecode blocks and files read. A second run executes each of the 1,620 tests in its own process tree to measure imports and fixture dependencies, including Python subprocesses.

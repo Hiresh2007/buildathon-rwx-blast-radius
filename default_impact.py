@@ -1,6 +1,7 @@
 """Selection for an isolated edit to a scalar default of a regular Python function."""
 
 import ast
+from ast_syntax import same_syntax
 import gzip
 import json
 
@@ -72,7 +73,7 @@ class DefaultIndex:
                 original = new.value
                 new.value = old.value
                 try:
-                    if ast.dump(candidate) != source.syntax:
+                    if not same_syntax(candidate, source.tree):
                         continue
                 finally:
                     new.value = original
