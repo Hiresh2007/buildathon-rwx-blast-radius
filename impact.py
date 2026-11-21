@@ -13,7 +13,9 @@ from pathlib import Path, PurePosixPath
 
 from arguments import ArgumentIndex
 from cache_impact import CacheConsumers
+from default_impact import DefaultIndex
 from execution import ExecutionIndex, ScopeChange
+from lookup_domains import LookupDomains
 from predicates import exemptions, load_domains
 from symbols import SymbolIndex
 
@@ -190,6 +192,8 @@ class ImpactIndex:
         self.symbols = SymbolIndex(_read_map("symbols.json.gz"), ids, self.root)
         self.domains = load_domains(here / "predicates.json.gz", ids)
         self.arguments = ArgumentIndex(here / "arguments.json.gz", ids)
+        self.defaults = DefaultIndex(here / "default-impact.json.gz", ids)
+        self.lookups = LookupDomains(here / "lookup-domains.json.gz", ids)
         deps = _read_map("dependencies.json.gz")
         if deps["ids"] != ids:
             raise ValueError("isolated test map uses another inventory")
@@ -336,6 +340,10 @@ def _python_change(change, index, prepared):
     setting = _setting_change(change.path, source, tree, replaced, inserted, index)
     if setting is not None:
         return setting | reads | partial
+    defaults = index.defaults.select(change.path, source, tree, replaced, inserted, index)
+    if defaults is not None:
+        return defaults
+
     line_bits = index.all_bits
     if _balanced_replacements(change.hunks):
         line_bits = _line_change(change.path, source, replaced, inserted, index)
@@ -361,6 +369,7 @@ def _python_change(change, index, prepared):
                 line_bits = symbols
     exempt = exemptions(change.path, source.tree, tree, index.domains, replaced, inserted)
     exempt |= index.arguments.exemptions(change.path, source.tree, tree, replaced, inserted, source.syntax)
+    exempt |= index.lookups.exemptions(change.path, source, tree, replaced, inserted) & ~index.execution.untraced
     return (line_bits & ~exempt) | reads | partial
 
 

@@ -3,6 +3,7 @@
 import argparse
 import gzip
 import json
+import math
 import time
 from pathlib import Path
 
@@ -62,7 +63,8 @@ def main():
     with gzip.open(Path(__file__).with_name("coverage.json.gz"), "rt", encoding="utf-8") as stream:
         index = ImpactIndex(json.load(stream), tests)
     probe = QueryProbe(tests)
-    milliseconds = {t["number"]: round(t["seconds"] * 1000) for t in tests}
+    milliseconds = {t["number"]: math.floor(t["seconds"] * 1000 + 0.5) for t in tests}
+    free_tests = {number for number, duration in milliseconds.items() if duration == 0}
     patches = {}
     selections = {}
     protected = {}
@@ -87,8 +89,11 @@ def main():
     for key, selected in selections.items():
         selected = selected | protected.get(key, set())
         workers = schedule(selected, milliseconds)
-        if key in patches and len(workers) > 1 and selected != index.all:
-            fill_slack(workers, index.related_tests(patches[key]), milliseconds)
+        if workers and selected != index.all:
+            if len(workers) == 1:
+                fill_slack(workers, [free_tests], milliseconds)
+            elif key in patches:
+                fill_slack(workers, [*index.related_tests(patches[key]), index.all], milliseconds)
         print(json.dumps({"commit": key, "workers": workers},
                          separators=(",", ":")))
 

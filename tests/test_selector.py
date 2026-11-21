@@ -13,6 +13,12 @@ from selector import fill_slack, schedule
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_zero_duration_tests_fit_existing_single_worker(self):
+        durations = {0: 5, 1: 0, 2: 0, 3: 1}
+        workers = schedule({0, 1}, durations)
+        fill_slack(workers, [{1, 2}], durations)
+        self.assertEqual(workers, [[0, 1, 2]])
+
     def test_padding_preserves_worker_cost_and_candidate_tests(self):
         durations = {0: 10000, 1: 4500, 2: 4300, 3: 75, 4: 1800, 5: 1000}
         workers = schedule({0, 1, 2}, durations)

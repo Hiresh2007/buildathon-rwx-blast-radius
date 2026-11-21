@@ -23,6 +23,8 @@ We also generated 14 independent changes across dialect settings, expression dec
 
 A separate mutation to a shared generator dispatch table broke 1,339 tests and the final schedule included all of them. The public sample also passed in the pinned linux/amd64 image on an emulated x86 processor at 117.095 simulated seconds. Time-limited test runs can choose different schedules on slower hardware.
 
+Two further independent batches exercised the multi-file and operand selection rules. We ran every patch against all 1,620 tests. Nine multi-file mutations produced 25 failing test/patch pairs and took 123.853 simulated seconds, compared with 331.353 for the earlier selector. Twelve single-file mutations of lookup keys, fallback values and function defaults produced 39 failing pairs. One matched run took 93.792 seconds including selector CPU, compared with 264.686. Both batches had zero missed patches. Three additional edits to defaults controlling expression order, quoting and dialect handling produced 121 failing test/patch pairs, all included in the schedules.
+
 ## How it chooses tests
 
 - The baseline maps record test-specific source lines, bytecode blocks and files read. A second run executes each of the 1,620 tests in its own process tree to measure imports and fixture dependencies, including Python subprocesses.
@@ -30,11 +32,13 @@ A separate mutation to a shared generator dispatch table broke 1,339 tests and t
 - For edits to shared cache builders, later readers of a cached value are retained even when another test originally filled the cache.
 - For required and optional expression arguments, the selector traces the validator’s actual inputs and checks which tests observe a missing key. Tests that inspect the schema directly remain eligible.
 - For simple comparisons and local boolean guards, the selector can rule out a test when every observed operand yields the same result before and after the edit. Unmeasured values keep the candidate.
+- For a literal string lookup on a built-in collection, it records the key sets seen by each test. A test can be ruled out when the changed key or fallback value leaves every observed lookup equivalent. Custom mappings and observations above the recording limits stay eligible.
+- For a single default-argument edit in an ordinary function or method, it records callers whose bound argument matched the old default. Tests that inspected or changed the function defaults, read the source, or ran unobserved subprocess code remain eligible.
 - The longest executor tests contain independent TPC queries. When a function-body edit touches a recorded query phase, the selector can run that phase on the patched source and compare its output with the pinned result. The worker has a bounded CPU and wall-time allowance.
 - For short schedules the selector can run the selected pytest cases on a private copy of the changed paths. For longer schedules it can confirm a single test when its measured runtime is sufficiently below the schedule time it could save. A test can be removed when its setup, body, subtests and teardown all pass. Timeouts keep the outstanding candidates.
 - Explicit readers of edited source and fixtures remain eligible for evaluation. For scalar substitutions across multiple deferred functions, the selector retains every observed caller of each entire function. Lexical changes, eager execution and unmodeled interactions retain the broader schedule. IDs missing from the baseline inventory are always included.
 
-Shorter workers can take additional related tests using their spare time without extending the schedule.
+Existing workers take additional zero-duration tests. Shorter workers take related tests first, then other tests that fit the same integer-millisecond makespan.
 
 The input is `/data/tests.json` and `/data/commits/*.patch`. Standard output contains one JSON object per patch. All checked-in observations come from the pinned checkout. The external scorer reads the sample answers.
 
@@ -58,6 +62,8 @@ export PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 "$PY" tools/build_dependencies.py "$SRC" "$TESTS" dependencies.json.gz --jobs 3
 "$PY" tools/build_symbols.py "$SRC" "$TESTS" coverage.json.gz symbols.json.gz
 "$PY" tools/build_predicates.py "$SRC" "$TESTS" predicates.json.gz
+"$PY" tools/build_lookup_domains.py "$SRC" "$TESTS" lookup-domains.json.gz
+"$PY" tools/build_default_impact.py "$SRC" "$TESTS" default-impact.json.gz
 "$PY" tools/build_query_map.py "$SRC" query-map.json.gz
 "$PY" -I -B -S symbols.py --build-baseline "$SRC" symbols.json.gz symbol-baseline.sqlite3
 ```
