@@ -39,6 +39,8 @@ Four single-file changes at frequently executed membership comparisons ran again
 
 We selected 16 single-file changes to frequently executed or randomly sampled conditions, then ran each patch against all 1,620 tests. The changes produced 1,412 failing patch/test pairs. The current selector retained every pair in 142.194 simulated seconds across the two native batches, compared with 366.631 seconds at `62bf52a`. In a separate 30-patch batch with 16 independent source changes and 14 public fixture, comment or mixed changes, both entries retained all 2,972 failing pairs. The simulated time fell from 250.041 to 224.914 seconds.
 
+The mixed-change selector now recognizes when the only change in one component is switching a comparison with `None` between equality and identity, and all observed operands have passive comparison semantics. It retains the tests that can reach every other changed component, as well as untraced tests and direct readers. Its isolated x86 Linux image selected every public failure in 106.777 simulated seconds.
+
 ## How it chooses tests
 
 - The baseline maps record test-specific source lines, bytecode blocks and files read. A second run executes each of the 1,620 tests in its own process tree to measure imports and fixture dependencies, including Python subprocesses.

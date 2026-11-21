@@ -458,7 +458,7 @@ def _test_module_change(change, index, prepared):
             | index.reads.get(path, 0) | index.execution.child_reads.get(path, 0))
 
 
-def _python_change(change, index, prepared):
+def _python_change(change, index, prepared, *, passive_exempt=None):
     source, changed, tree, replaced, inserted = prepared
     reads = index.reads.get(change.path, 0)
     # A test whose subprocess escaped the whole-suite tracer is still represented
@@ -484,10 +484,12 @@ def _python_change(change, index, prepared):
             # Never mutate the cached or candidate ASTs used by the other analyses.
             if not _same_outside_scopes(source.text, ast.parse(changed), scopes):
                 line_bits = index.all_bits
-        if line_bits == index.all_bits:
+        if line_bits == index.all_bits and passive_exempt is None:
             symbols = index.symbols.select(change.path, source.tree, tree, source.text, changed)
             if symbols is not None:
                 line_bits = symbols
+    if passive_exempt is not None:
+        return (line_bits & ~(passive_exempt & ~index.execution.untraced)) | reads | partial
     exempt = exemptions(change.path, source.tree, tree, index.domains, replaced, inserted)
     exempt |= index.arguments.exemptions(change.path, source.tree, tree, replaced, inserted)
     exempt |= index.lookups.exemptions(change.path, source, tree, replaced, inserted) & ~index.execution.untraced
@@ -575,9 +577,17 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
                 # reach a modified instruction, load a changed configuration
                 # value, or omit a changed function argument. Use the union of
                 # these observations, retaining child and cache consumers.
-                # Operand-specific exemptions for independent edits cannot be
-                # combined: a value changed upstream may reach either function.
-                source, _, tree, _, _ = prepared
+                source, _, tree, replaced, inserted = prepared
+                # The first differing value must arise in one of the edits. A
+                # globally passive comparison preserves the value and does not
+                # invoke custom code. The other components retain all their
+                # reachable edits, including an upstream change in operand type.
+                passive = index.none_comparisons.exemptions(
+                    change.path, source, tree, replaced, inserted, fully_passive=True
+                )
+                if passive:
+                    bits |= _python_change(change, index, prepared, passive_exempt=passive) | cache_bits
+                    continue
                 calls = index.execution.select(change.path, source.text, tree, local_substitutions_only=True,
                                                original_tree=source.tree)
                 if calls is None:

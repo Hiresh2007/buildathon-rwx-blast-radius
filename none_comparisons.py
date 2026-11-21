@@ -49,7 +49,7 @@ class ObservedSites:
 
 
 class NoneComparisons(ObservedSites):
-    def exemptions(self, path, source, candidate, replaced, inserted):
+    def exemptions(self, path, source, candidate, replaced, inserted, *, fully_passive=False):
         if inserted or not replaced or not replaced.issubset(self.lines.get(path, ())):
             return 0
         first, last = min(replaced), max(replaced)
@@ -78,6 +78,8 @@ class NoneComparisons(ObservedSites):
             node.ops = old.ops
             try:
                 if same_syntax(candidate, source.tree):
+                    if fully_passive and unsafe:
+                        return 0
                     return self.complete & seen & ~unsafe
             finally:
                 node.ops = edited_ops
