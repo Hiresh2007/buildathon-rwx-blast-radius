@@ -43,6 +43,8 @@ Eight independent insertions in nested branches and four multi-file changes were
 
 Four class-line shifts and six changes combining ordinary generator edits with another source change ran against all 1,620 tests. The matched native schedules included all 24 and 19 failing pairs and fell from 147.268 to 83.761 seconds and from 220.902 to 149.774 seconds. On the eight structural edits above, the integrated selector took 115.267 seconds and included all 1,132 failing pairs. Its four mixed edits took 114.240 seconds and included all 2,486 pairs. The 30-patch independent cohort stayed at 224.914 seconds with every failing pair covered.
 
+The query confirmer applies all changed source modules together and materializes changed SQL fixtures in its read-only-checkout overlay. Direct readers of a changed fixture stay eligible. On the six generator/mixed patches, this reduced the matched simulated time further, from 149.774 to 117.498 seconds, while retaining every one of the 19 failing pairs. In two native runs the corresponding cost including selector CPU fell from 154.415 to 127.373 seconds and from 154.308 to 126.972 seconds.
+
 The joint collector passed all 1,620 tests and 25,440 subtests on macOS and native ARM Linux. Their 1,838 import records and 282 generator records agreed on the compatible bytecode, blocks and test masks. The image measures its own platform and architecture at build time.
 
 ## How it chooses tests

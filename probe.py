@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -58,8 +59,18 @@ def worker():
     cap = request["budget"]
     resource.setrlimit(resource.RLIMIT_CPU, (cap, cap + 1))
     root = Path(request["root"])
-    load_checkout(root, request["files"])
-    verify(root, request["checks"], request["records"])
+    fixtures = request.get("fixtures", {})
+    if fixtures:
+        from pytest_replay import overlay
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "src"
+            resources = {**fixtures, "tests/helpers.py": (root / "tests/helpers.py").read_text()}
+            overlay(root, candidate, resources)
+            load_checkout(candidate, request["files"])
+            verify(candidate, request["checks"], request["records"])
+    else:
+        load_checkout(root, request["files"])
+        verify(root, request["checks"], request["records"])
 
 
 class QueryProbe:
@@ -82,11 +93,19 @@ class QueryProbe:
             return selected
         touched = 0
         files = {}
+        fixtures = {}
         try:
             changes = _parse_diff(text)
-            if len(changes) != 1:
-                return selected
+            combined = len(changes) > 1
             for change in changes:
+                if combined and change.path.startswith("tests/fixtures/") and change.path in index.reads:
+                    fixtures[change.path] = _apply((index.root / change.path).read_text(encoding="utf-8"), change.hunks)[0]
+                    readers = index.tests_from_bits(index.reads[change.path] | index.execution.child_reads.get(change.path, 0)
+                                                    | index.isolated.get(change.path, 0) | index.unknown)
+                    targets = {g: n for g, n in targets.items() if n not in readers}
+                    if not targets:
+                        return selected
+                    continue
                 if not change.path.startswith("sqlglot/") or not change.path.endswith(".py"):
                     return selected
                 source = index.source(change.path)
@@ -160,7 +179,7 @@ class QueryProbe:
         cap = min(7, self.budget, int(potential * 0.80))
         if cap < 2 or 0.15 + sum(cpu[g] for g in pending) * 0.8 > cap:
             return selected
-        request = dict(root=str(index.root), files=files, checks=pending, records=records, budget=cap)
+        request = dict(root=str(index.root), files=files, fixtures=fixtures, checks=pending, records=records, budget=cap)
         self.budget -= cap
         try:
             reply = subprocess.run(
