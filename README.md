@@ -10,6 +10,8 @@ make sample
 
 This downloads the public kit and pinned source into `.cache/`, runs our selector and the official starter, and scores both with the organizer's scorer. The reported local totals exclude CPU time. For the Docker runtime check, run `make sample-docker` with a linux/amd64-capable Docker engine. [Track and scoring rules](https://www.joinbuilders.org/buildathon/tracks/blast-radius)
 
+On the 30 public patches, this selector scored 340.483 simulated seconds against the starter's 1,210.470. Both covered every failing test. In a separate experiment on a changed SQLGlot configuration flag, the selector scheduled six tests and included all five failures observed in a full test run.
+
 The image reads `/data/tests.json` and `/data/commits/*.patch` and writes one compact JSON object per patch. It includes the pinned baseline source so it can examine surrounding code. Unknown or unsupported changes select a broader set of tests. The runtime has no external package dependencies.
 
 ## Regenerate the map
@@ -23,7 +25,7 @@ python3.13 -m venv .cache/trace-env
 make sample
 ```
 
-The generator uses pytest and CPython monitoring to record each test's dependencies. Subprocess-only coverage is marked incomplete. The public answers are input to the external scorer only.
+The generator uses pytest and CPython monitoring to record each test's dependencies. It also measures reads of eligible scalar class settings so a change to a flag can select its consumers. Subprocess-only coverage is marked incomplete. The published map was generated with Python 3.13.18 on macOS. The public answers are input to the external scorer only.
 
 ## Credits
 
