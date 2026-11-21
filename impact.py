@@ -211,7 +211,8 @@ class ImpactIndex:
         self.root = Path(source_root)
         here = Path(__file__).resolve().parent
         ids = map_data["ids"]
-        self.execution = ExecutionIndex(_read_map("execution.json.gz"), ids, _read_map("children.json.gz"))
+        self.execution = ExecutionIndex(_read_map("execution.json.gz"), ids, _read_map("children.json.gz"),
+                                        _read_map("import-blocks.json.gz"))
         self.symbols = SymbolIndex(_read_map("symbols.json.gz"), ids, self.root)
         self.domains = load_domains(here / "predicates.json.gz", ids)
         self.arguments = ArgumentIndex(here / "arguments.json.gz", ids)

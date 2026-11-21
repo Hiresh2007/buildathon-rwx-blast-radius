@@ -5,6 +5,7 @@ from ast_syntax import same_syntax
 import bisect
 import dis
 import hashlib
+import platform
 import struct
 import sys
 import types
@@ -216,8 +217,117 @@ def only_local_conditions(original, candidate, old, new):
     return match(before, after) and changed_guard
 
 
+def first_changed_blocks(old, new, old_ops, old_values, new_ops, new_values):
+    """Walk both ordinary control-flow graphs up to their first semantic differences."""
+    def handlers(code, operations):
+        positions = {op.offset: i for i, op in enumerate(operations)}
+        entries = tuple(dis.Bytecode(code).exception_entries)
+        result = {}
+        for entry in entries:
+            if entry.target not in positions:
+                return None
+            for position in range(entry.start, entry.end, 2):
+                if position in positions:
+                    result.setdefault(positions[position], (entry.depth, entry.lasti, positions[entry.target]))
+        return result
+    old_handlers, new_handlers = handlers(old, old_ops), handlers(new, new_ops)
+    if old_handlers is None or new_handlers is None:
+        return None
+    limit = 3 * (len(old_ops) + len(new_ops))
+    starts = block_starts(old)
+    changed = set()
+    pending = [(0, 0)]
+    visited = set()
+    unconditional = {"JUMP_FORWARD", "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"}
+    terminal = {"RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS", "RERAISE"}
+    while pending:
+        left, right = pending.pop()
+        if (left, right) in visited:
+            continue
+        visited.add((left, right))
+        if len(visited) > limit or not 0 <= left < len(old_ops) or not 0 <= right < len(new_ops):
+            return None
+        old_op, new_op = old_ops[left], new_ops[right]
+        left_handler, right_handler = old_handlers.get(left), new_handlers.get(right)
+        if left_handler and right_handler and left_handler[:2] == right_handler[:2]:
+            pending.append((left_handler[2], right_handler[2]))
+        if (left_handler or right_handler) and ((left_handler or ())[:2] != (right_handler or ())[:2]):
+            differs = True
+        elif old_op.opname != new_op.opname:
+            differs = True
+        elif old_op.opcode in dis.hasjump:
+            # Compare both successors. Physical offsets shift when a branch grows.
+            pending.append((old_values[left][1], new_values[right][1]))
+            if old_op.opname not in unconditional:
+                pending.append((left + 1, right + 1))
+            continue
+        else:
+            differs = old_values[left] != new_values[right]
+        if differs:
+            changed.add(starts[bisect.bisect_right(starts, old_op.offset) - 1])
+        elif old_op.opname not in terminal:
+            pending.append((left + 1, right + 1))
+    return changed
+
+
+def guarded_returns_only(original, candidate, old, new):
+    """Recognize insertion or removal of early returns on local identity checks."""
+    if original is None:
+        return False
+    def definition(tree, code):
+        return next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                     and not node.decorator_list and node.lineno == code.co_firstlineno
+                     and node.name == code.co_name), None)
+    before, after = definition(original, old), definition(candidate, new)
+    if before is None or after is None:
+        return False
+    locals_ = set(old.co_varnames[:old.co_argcount + old.co_kwonlyargcount])
+    changed = False
+    def guard(node):
+        if not (isinstance(node, ast.If) and not node.orelse and len(node.body) == 1
+                and isinstance(node.body[0], ast.Return)):
+            return False
+        test = node.test
+        if not (isinstance(test, ast.Compare) and len(test.ops) == 1
+                and isinstance(test.ops[0], (ast.Is, ast.IsNot))):
+            return False
+        left, right = test.left, test.comparators[0]
+        if isinstance(left, ast.Constant):
+            left, right = right, left
+        passed = node.body[0].value
+        return (isinstance(left, ast.Name) and left.id in locals_ and isinstance(right, ast.Constant)
+                and (right.value is None or type(right.value) is bool)
+                and (passed is None or isinstance(passed, ast.Constant)
+                     or isinstance(passed, ast.Name) and passed.id in locals_))
+    def match(a, b):
+        nonlocal changed
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, list):
+            i = j = 0
+            while i < len(a) or j < len(b):
+                if i < len(a) and j < len(b) and match(a[i], b[j]):
+                    i += 1
+                    j += 1
+                elif i < len(a) and guard(a[i]):
+                    changed = True
+                    i += 1
+                elif j < len(b) and guard(b[j]):
+                    changed = True
+                    j += 1
+                else:
+                    return False
+            return True
+        if not isinstance(a, ast.AST):
+            return constant(a) == constant(b)
+        if a is not before and isinstance(a, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return same_syntax(a, b)
+        return all(match(getattr(a, field), getattr(b, field)) for field in a._fields)
+    return match(before, after) and changed
+
+
 class ExecutionIndex:
-    def __init__(self, data, ids, children):
+    def __init__(self, data, ids, children, import_blocks=None):
         if data["ids"] != ids:
             raise ValueError("execution map uses another test inventory")
         self.complete = data["complete"]
@@ -225,6 +335,10 @@ class ExecutionIndex:
         self.masks = [int(encoded, 16) for encoded in data["sets"]]
         self.untraced = self.masks[data["untraced"]]
         self.compatible = data["python"] == sys.implementation.cache_tag
+        self.import_blocks = {}
+        if (import_blocks and import_blocks["python"] == sys.implementation.cache_tag
+                and import_blocks["platform"] == sys.platform and import_blocks.get("machine") == platform.machine()):
+            self.import_blocks = import_blocks["files"]
         if children["ids"] != ids:
             raise ValueError("child coverage uses another inventory")
         matched = children["python"] == sys.implementation.cache_tag and children["platform"] == sys.platform
@@ -249,7 +363,8 @@ class ExecutionIndex:
             if old.co_flags & (0x20 | 0x80 | 0x200):
                 return None
             if local_substitutions_only and (not self.compatible or not (scalar_replacements(old, new)
-                    or only_local_conditions(original_tree, tree, old, new))):
+                    or only_local_conditions(original_tree, tree, old, new)
+                    or guarded_returns_only(original_tree, tree, old, new))):
                 # New calls, stores and control flow can introduce unmeasured
                 # interactions between modules or tests.
                 return None
@@ -263,20 +378,29 @@ class ExecutionIndex:
                     return None
                 continue
             early, calls, fingerprint, blocks = record
-            if early:
+            first = self.import_blocks.get(path, {}).get(name) if early else None
+            if early and (not first or first[0] != fingerprint):
                 return None
             possible = self.masks[calls]
-            if possible and self.compatible and bytecode_key(old) == fingerprint and old.co_exceptiontable == new.co_exceptiontable:
+            localized = False
+            if (possible or early) and self.compatible and bytecode_key(old) == fingerprint:
                 before, a = instructions(old)
                 after, b = instructions(new)
-                if len(a) == len(b) and old.co_names == new.co_names:
+                if len(a) == len(b) and old.co_names == new.co_names and old.co_exceptiontable == new.co_exceptiontable:
                     starts = block_starts(old)
                     touched = {starts[bisect.bisect_right(starts, op.offset) - 1]
                                for op, left, right in zip(before, a, b) if left != right}
-                    if touched:
-                        block_masks = {offset: self.masks[m] for offset, m in blocks}
-                        possible = 0
-                        for offset in touched:
-                            possible |= block_masks.get(offset, 0)
+                else:
+                    touched = first_changed_blocks(old, new, before, a, after, b)
+                if touched:
+                    if early and not touched.isdisjoint(first[1]):
+                        return None
+                    localized = True
+                    block_masks = {offset: self.masks[m] for offset, m in blocks}
+                    possible = 0
+                    for offset in touched:
+                        possible |= block_masks.get(offset, 0)
+            if early and not localized:
+                return None
             selected |= possible
         return selected
