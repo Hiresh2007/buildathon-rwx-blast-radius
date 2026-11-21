@@ -65,6 +65,7 @@ def main():
     milliseconds = {t["number"]: round(t["seconds"] * 1000) for t in tests}
     patches = {}
     selections = {}
+    protected = {}
     for path in sorted((args.data / "commits").glob("*.patch")):
         if time.monotonic() - started > 125:
             selections[path.stem] = index.all
@@ -75,12 +76,16 @@ def main():
             selections[path.stem] = index.all
             continue
         patches[path.stem] = patch
-        selected = choose_tests(patch, index, tests)
-        selections[path.stem] = probe.select(patch, index, selected, milliseconds, schedule)
+        protected[path.stem] = set()
+        selected = choose_tests(patch, index, tests, protected=protected[path.stem])
+        if selected != index.all and not protected[path.stem]:
+            selected = probe.select(patch, index, selected, milliseconds, schedule)
+        selections[path.stem] = selected
     if time.monotonic() - started < 140:
-        candidates = {key: selections[key] for key in patches}
-        selections.update(refine(patches, candidates, index, tests))
+        candidates = {key: selections[key] for key in patches if selections[key] != index.all and not protected[key]}
+        selections.update(refine(patches, candidates, index, tests, schedule))
     for key, selected in selections.items():
+        selected = selected | protected.get(key, set())
         workers = schedule(selected, milliseconds)
         if key in patches and len(workers) > 1 and selected != index.all:
             fill_slack(workers, index.related_tests(patches[key]), milliseconds)

@@ -8,6 +8,9 @@ SQLGLOT_REV := eb11aec4be8cb2122afe713a4816662c3f0fb2fa
 ifndef SQLGLOT_ROOT
 SQLGLOT_ROOT := $(CURDIR)/.cache/sqlglot
 NATIVE_SOURCE := .cache/sqlglot/.ready
+SAMPLE_SOURCE := --archive .cache/sqlglot.tar.gz
+else
+SAMPLE_SOURCE := --source "$(SQLGLOT_ROOT)"
 endif
 
 SCORE = $(PYTHON) "$(KIT)/score.py" "$(DATA)" "$(DATA)/answers.json"
@@ -16,7 +19,7 @@ STARTER = import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]);
 
 .PHONY: sample sample-docker
 sample: $(KIT)/.ready $(NATIVE_SOURCE)
-	@SQLGLOT_ROOT="$(SQLGLOT_ROOT)" $(PYTHON) selector.py "$(DATA)" > .cache/selector.jsonl
+	@$(PYTHON) tools/run_sample.py "$(DATA)" $(SAMPLE_SOURCE) > .cache/selector.jsonl
 	@$(PYTHON) -c '$(STARTER)' "$(KIT)" "$(DATA)" > .cache/starter.jsonl
 	@echo 'Selector on public sample (CPU excluded)'
 	@$(SCORE) .cache/selector.jsonl --cpu-seconds 0

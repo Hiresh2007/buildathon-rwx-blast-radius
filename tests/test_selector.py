@@ -3,10 +3,11 @@ import difflib
 import gzip
 import json
 import os
+import sys
 from pathlib import Path
 import unittest
 
-from execution import ScopeChange, changes
+from execution import ExecutionIndex, ScopeChange, changes
 from impact import ImpactIndex, choose_tests
 from selector import fill_slack, schedule
 
@@ -30,6 +31,18 @@ class SchedulerTests(unittest.TestCase):
         observed = changes(compile(old, 'sample.py', 'exec'),
                            compile(ast.parse(new), 'sample.py', 'exec'))
         self.assertEqual([before.co_qualname for before, _ in observed], ['Expressions.<lambda>'])
+
+    def test_child_only_function_is_preserved(self):
+        path = 'sqlglot/example.py'
+        ids = ['parent', 'child']
+        tag = sys.implementation.cache_tag
+        parent = dict(ids=ids, python=tag, complete=True, files={path: {}}, sets=['2'], untraced=0)
+        children = dict(ids=ids, python=tag, platform=sys.platform, complete='2',
+                        scopes={path + '|1:active': '2'}, reads={})
+        baseline = 'def active():\n    return 1\n\ndef unused():\n    return 7\n'
+        index = ExecutionIndex(parent, ids, children)
+        self.assertEqual(index.select(path, baseline, ast.parse(baseline.replace('return 1', 'return 2'))), 2)
+        self.assertEqual(index.select(path, baseline, ast.parse(baseline.replace('return 7', 'return 8'))), 0)
 
     def test_generator_conversion_changes_all_calls(self):
         old = 'def transform(value):\n    if value:\n        return value\n    return None\n'

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
+from arguments import ArgumentIndex
+from cache_impact import CacheConsumers
 from execution import ExecutionIndex, ScopeChange
 from predicates import exemptions, load_domains
 from symbols import SymbolIndex
@@ -184,9 +186,10 @@ class ImpactIndex:
         self.root = Path(source_root)
         here = Path(__file__).resolve().parent
         ids = map_data["ids"]
-        self.execution = ExecutionIndex(_read_map("execution.json.gz"), ids)
+        self.execution = ExecutionIndex(_read_map("execution.json.gz"), ids, _read_map("children.json.gz"))
         self.symbols = SymbolIndex(_read_map("symbols.json.gz"), ids, self.root)
         self.domains = load_domains(here / "predicates.json.gz", ids)
+        self.arguments = ArgumentIndex(here / "arguments.json.gz", ids)
         deps = _read_map("dependencies.json.gz")
         if deps["ids"] != ids:
             raise ValueError("isolated test map uses another inventory")
@@ -206,6 +209,7 @@ class ImpactIndex:
         self.incomplete = masks[map_data["incomplete"]]
         self.import_lines = {path: set(lines) for path, lines in map_data.get("import_lines", {}).items()}
         self.config = {key: masks[index] for key, index in map_data.get("config", {}).items()}
+        self.cache_consumers = CacheConsumers(_read_map("cache-consumers.json.gz"), self)
 
     @lru_cache(maxsize=16)
     def source(self, path):
@@ -338,7 +342,10 @@ def _python_change(change, index, prepared):
         line_bits = _line_change(change.path, source, replaced, inserted, index)
     execution_bits = index.execution.select(change.path, source.text, tree)
     if execution_bits is not None:
-        line_bits &= execution_bits
+        # Main-process line coverage cannot rule out a call observed only in a child.
+        line_bits = (line_bits & execution_bits) | (execution_bits & index.execution.child_complete)
+        partial &= ~index.execution.child_complete
+        reads |= index.execution.child_reads.get(change.path, 0)
     else:
         if line_bits != index.all_bits:
             scopes = set()
@@ -354,6 +361,7 @@ def _python_change(change, index, prepared):
             if symbols is not None:
                 line_bits = symbols
     exempt = exemptions(change.path, source.tree, tree, index.domains, replaced, inserted)
+    exempt |= index.arguments.exemptions(change.path, source.tree, tree, replaced, inserted, source.syntax)
     return (line_bits & ~exempt) | reads | partial
 
 
@@ -386,7 +394,7 @@ def _line_change(path, source, replaced, inserted, index):
     return selected
 
 
-def choose_tests(patch_text, index, tests=None):
+def choose_tests(patch_text, index, tests=None, *, protected=None):
     """Return numbers from the live test manifest, falling back for unmodelled changes."""
     if index is None:
         return {test["number"] for test in tests}
@@ -401,7 +409,7 @@ def choose_tests(patch_text, index, tests=None):
                 prepared = _prepare_change(change, index)
                 baseline, _, candidate, _, _ = prepared
                 if baseline.syntax == ast.dump(candidate):
-                    bits |= index.reads.get(change.path, 0)
+                    bits |= index.reads.get(change.path, 0) | index.execution.child_reads.get(change.path, 0)
                 elif not change.path.startswith("sqlglot/"):
                     return set(index.all)
                 else:
@@ -418,7 +426,10 @@ def choose_tests(patch_text, index, tests=None):
             return set(index.all)
         if code:
             change, prepared = code[0]
-            bits |= _python_change(change, index, prepared)
+            cache_bits = index.cache_consumers.floor(change.path, prepared[3], prepared[4])
+            if cache_bits and protected is not None:
+                protected.update(index.tests_from_bits(cache_bits))
+            bits |= _python_change(change, index, prepared) | cache_bits
         return index.tests_from_bits(bits)
     except (ScopeChange, OSError, UnicodeError, SyntaxError, RecursionError, ValueError):
         return set(index.all)

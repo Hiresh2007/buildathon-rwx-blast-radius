@@ -105,7 +105,7 @@ def changes(old, new):
 
 
 class ExecutionIndex:
-    def __init__(self, data, ids):
+    def __init__(self, data, ids, children):
         if data["ids"] != ids:
             raise ValueError("execution map uses another test inventory")
         self.complete = data["complete"]
@@ -113,6 +113,12 @@ class ExecutionIndex:
         self.masks = [int(encoded, 16) for encoded in data["sets"]]
         self.untraced = self.masks[data["untraced"]]
         self.compatible = data["python"] == sys.implementation.cache_tag
+        if children["ids"] != ids:
+            raise ValueError("child coverage uses another inventory")
+        matched = children["python"] == sys.implementation.cache_tag and children["platform"] == sys.platform
+        self.child_complete = int(children["complete"], 16) & self.untraced if matched else 0
+        self.child_calls = {k: int(v, 16) for k, v in children["scopes"].items()} if matched else {}
+        self.child_reads = {k: int(v, 16) for k, v in children["reads"].items()} if matched else {}
 
     @staticmethod
     @lru_cache(maxsize=12)
@@ -126,11 +132,13 @@ class ExecutionIndex:
             changed = changes(self.baseline(source, path), compile(tree, path, "exec", dont_inherit=True))
         except (ValueError, RecursionError):
             return None
-        selected = self.untraced
+        selected = self.untraced & ~self.child_complete
         for old, new in changed:
             if old.co_flags & (0x20 | 0x80 | 0x200):
                 return None
-            record = self.files[path].get(scope_name(old))
+            name = scope_name(old)
+            selected |= self.child_calls.get(f"{path}|{name}", 0)
+            record = self.files[path].get(name)
             if record is None:
                 # Only the measured interpreter can distinguish a never-called scope
                 # from a scope the compiler emitted under another name.

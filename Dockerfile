@@ -10,6 +10,8 @@ COPY requirements.lock ./
 RUN python -m pip install --disable-pip-version-check --no-cache-dir -r requirements.lock
 COPY --from=source /opt/sqlglot /opt/sqlglot
 COPY *.py *.json.gz ./
+COPY tools/build_children.py /tmp/build_children.py
+RUN python /tmp/build_children.py /opt/sqlglot coverage.json.gz children.json.gz
 RUN python -I -B -S symbols.py --build-baseline /opt/sqlglot symbols.json.gz symbol-baseline.sqlite3 \
     && chmod 644 symbol-baseline.sqlite3
 

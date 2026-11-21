@@ -1,5 +1,6 @@
 """Refine small candidate schedules by running the real pinned pytest tests on an overlay."""
 import ast
+import gzip
 import json
 import os
 import signal
@@ -146,6 +147,11 @@ def supervise():
                     used_cpu += usage.ru_utime + usage.ru_stime
                     break
                 time.sleep(0.012)
+            # A CPU-limited group leader can exit while process-pool workers live on.
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             if os.waitstatus_to_exitcode(status) == 0 and output.exists():
                 print(json.dumps([key, json.loads(output.read_text())]), flush=True)
 
@@ -158,17 +164,58 @@ def setup_classes(root, file):
                     and item.name == "setUpClass" for item in node.body)}
 
 
-def refine(patches, selections, index, tests):
+def _pivot(numbers, lookup, times, milliseconds, schedule):
+    """Pick the largest profitable marginal reduction under the live worker cost."""
+    def price(selection):
+        workers = schedule(selection, milliseconds)
+        loads = [sum(milliseconds[n] for n in worker) for worker in workers]
+        return 2 * len(workers) + max(loads, default=0) / 1000
+
+    # A runtime measured on another host is an estimate. Demand a margin for
+    # machine speed, collection and unsuccessful confirmations.
+    contenders = []
+    for number in numbers:
+        cpu = times.get(lookup[number]["id"])
+        if cpu is not None and cpu < 1.45 and milliseconds[number] / 1000 > 2.5 * cpu + 0.30:
+            contenders.append(number)
+    if not contenders:
+        return None
+    current = price(numbers)
+    best = None
+    for n in contenders:
+        cpu = times[lookup[n]["id"]]
+        gain = current - price(numbers - {n})
+        if gain < 2.5 * cpu + 0.30:
+            continue
+        candidate = (gain - cpu, n, cpu)
+        if best is None or candidate > best:
+            best = candidate
+    return best
+
+
+def refine(patches, selections, index, tests, schedule=None):
     lookup = {t["number"]: t for t in tests}
     ids = {t["id"]: t["number"] for t in tests}
     jobs = []
+    times = {}
+    if schedule is not None:
+        with gzip.open(Path(__file__).with_name("pivot-times.json.gz"), "rt") as stream:
+            times = json.load(stream)
+    milliseconds = {n: round(t["seconds"] * 1000) for n, t in lookup.items()}
     for key, numbers in selections.items():
-        if not numbers or len(numbers) > 12 or numbers.intersection(index.unmeasured):
+        if not numbers or numbers.intersection(index.unmeasured):
             continue
         rows = [lookup[n] for n in sorted(numbers)]
         duration = sum(t["seconds"] for t in rows)
-        if duration > 0.65:
-            continue
+        pivot = None
+        if len(numbers) > 12 or duration > 0.65:
+            if not times or numbers == index.all:
+                continue
+            pivot = _pivot(numbers, lookup, times, milliseconds, schedule)
+            if pivot is None:
+                continue
+            _, chosen, predicted = pivot
+            rows = [lookup[chosen]]
         files = {}
         try:
             changes = _parse_diff(patches[key])
@@ -183,7 +230,7 @@ def refine(patches, selections, index, tests):
         # they identify a single failure. Prioritize possible formatting-only changes.
         fixtures = [change for change in changes if change.path.startswith("tests/fixtures/")]
         cosmetic = False
-        if fixtures:
+        if fixtures and not pivot:
             def folded(sign):
                 return "".join("".join(line[1:].split()).casefold() for change in fixtures
                                for _, hunk in change.hunks for line in hunk
@@ -197,10 +244,15 @@ def refine(patches, selections, index, tests):
                               for t in rows)
         except (OSError, ValueError, SyntaxError):
             continue
-        if class_setup and not (cosmetic and duration < 0.25):
+        if class_setup and not pivot and not (cosmetic and duration < 0.25):
             continue
         time_limit = min(2.6, (2.2 if class_setup else 1.6) + duration)
-        jobs.append((class_setup, duration, key, files, [t["id"] for t in rows], time_limit))
+        if pivot:
+            # Normal whole-group confirmations get the first share of the existing budget.
+            jobs.append((2, -pivot[0], key, files, [t["id"] for t in rows],
+                         min(2.6, 0.8 + 1.8 * predicted)))
+        else:
+            jobs.append((class_setup, duration, key, files, [t["id"] for t in rows], time_limit))
     if not jobs:
         return selections
     jobs.sort(key=lambda item: (item[0], item[1], item[2]))

@@ -2,3 +2,5 @@
 !/*.py
 !/*.json.gz
 !/requirements.lock
+!/tools/
+!/tools/build_children.py
