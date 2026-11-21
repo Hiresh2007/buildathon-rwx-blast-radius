@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 import unittest
 
-from execution import ExecutionIndex, ScopeChange, changes
+from execution import ExecutionIndex, ScopeChange, changes, scalar_replacements
 from impact import ImpactIndex, choose_tests
 from selector import fill_slack, schedule
 
@@ -31,6 +31,13 @@ class SchedulerTests(unittest.TestCase):
         observed = changes(compile(old, 'sample.py', 'exec'),
                            compile(ast.parse(new), 'sample.py', 'exec'))
         self.assertEqual([before.co_qualname for before, _ in observed], ['Expressions.<lambda>'])
+
+    def test_combined_changes_require_existing_scalar_operands(self):
+        def code(body):
+            return compile("def f(value):\n    " + body, "case.py", "exec").co_consts[0]
+        self.assertTrue(scalar_replacements(code("return value + 1"), code("return value + 2")))
+        self.assertFalse(scalar_replacements(code("return value + 1"), code("return len(value)")))
+        self.assertFalse(scalar_replacements(code("return value + 1"), code("return value + 'x'")))
 
     def test_child_only_function_is_preserved(self):
         path = 'sqlglot/example.py'

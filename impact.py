@@ -336,7 +336,6 @@ def _python_change(change, index, prepared):
     setting = _setting_change(change.path, source, tree, replaced, inserted, index)
     if setting is not None:
         return setting | reads | partial
-
     line_bits = index.all_bits
     if _balanced_replacements(change.hunks):
         line_bits = _line_change(change.path, source, replaced, inserted, index)
@@ -422,14 +421,26 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
                     index.isolated.get(change.path, 0) | index.unknown))
             else:
                 return set(index.all)
-        if len(code) > 1:
-            return set(index.all)
-        if code:
-            change, prepared = code[0]
+        for change, prepared in code:
             cache_bits = index.cache_consumers.floor(change.path, prepared[3], prepared[4])
             if cache_bits and protected is not None:
                 protected.update(index.tests_from_bits(cache_bits))
-            bits |= _python_change(change, index, prepared) | cache_bits
+            if len(code) == 1:
+                bits |= _python_change(change, index, prepared) | cache_bits
+            else:
+                # Before two edits can interact, the unchanged execution must
+                # reach at least one edited deferred function. Use every caller
+                # of each whole function, including child and cache consumers.
+                # Operand-specific exemptions for independent edits cannot be
+                # combined: a value changed upstream may reach either function.
+                source, _, tree, _, _ = prepared
+                calls = index.execution.select(change.path, source.text, tree, whole_scopes=True)
+                if calls is None:
+                    return set(index.all)
+                cold = index.isolated.get(change.path, 0) | index.unknown
+                partial = index.incomplete & cold & ~index.execution.child_complete
+                bits |= (calls | cache_bits | partial | index.reads.get(change.path, 0)
+                         | index.execution.child_reads.get(change.path, 0))
         return index.tests_from_bits(bits)
     except (ScopeChange, OSError, UnicodeError, SyntaxError, RecursionError, ValueError):
         return set(index.all)

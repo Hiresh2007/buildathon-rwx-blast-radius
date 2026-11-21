@@ -104,6 +104,25 @@ def changes(old, new):
     return changed
 
 
+def scalar_replacements(old, new):
+    """Compare instructions with jump destinations and constants resolved."""
+    if old.co_names != new.co_names or old.co_exceptiontable != new.co_exceptiontable:
+        return False
+    old_ops, before = instructions(old)
+    new_ops, after = instructions(new)
+    if len(before) != len(after):
+        return False
+    simple = (bool, int, float, str, bytes, type(None))
+    for i, (left, right) in enumerate(zip(before, after)):
+        if left == right:
+            continue
+        a, b = old_ops[i], new_ops[i]
+        if (a.opname not in ("LOAD_CONST", "RETURN_CONST") or a.opname != b.opname
+                or type(a.argval) not in simple or type(a.argval) is not type(b.argval)):
+            return False
+    return True
+
+
 class ExecutionIndex:
     def __init__(self, data, ids, children):
         if data["ids"] != ids:
@@ -125,7 +144,7 @@ class ExecutionIndex:
     def baseline(source, path):
         return compile(source, path, "exec", dont_inherit=True)
 
-    def select(self, path, source, tree):
+    def select(self, path, source, tree, *, whole_scopes=False):
         if not self.complete or path not in self.files or not path.startswith("sqlglot/"):
             return None
         try:
@@ -135,6 +154,10 @@ class ExecutionIndex:
         selected = self.untraced & ~self.child_complete
         for old, new in changed:
             if old.co_flags & (0x20 | 0x80 | 0x200):
+                return None
+            if whole_scopes and (not self.compatible or not scalar_replacements(old, new)):
+                # New calls, stores and control flow can introduce unmeasured
+                # interactions between modules or tests.
                 return None
             name = scope_name(old)
             selected |= self.child_calls.get(f"{path}|{name}", 0)
@@ -149,7 +172,7 @@ class ExecutionIndex:
             if early:
                 return None
             possible = self.masks[calls]
-            if possible and self.compatible and bytecode_key(old) == fingerprint and old.co_exceptiontable == new.co_exceptiontable:
+            if not whole_scopes and possible and self.compatible and bytecode_key(old) == fingerprint and old.co_exceptiontable == new.co_exceptiontable:
                 before, a = instructions(old)
                 after, b = instructions(new)
                 if len(a) == len(b) and old.co_names == new.co_names:

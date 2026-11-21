@@ -32,7 +32,7 @@ A separate mutation to a shared generator dispatch table broke 1,339 tests and t
 - For simple comparisons and local boolean guards, the selector can rule out a test when every observed operand yields the same result before and after the edit. Unmeasured values keep the candidate.
 - The longest executor tests contain independent TPC queries. When a function-body edit touches a recorded query phase, the selector can run that phase on the patched source and compare its output with the pinned result. The worker has a bounded CPU and wall-time allowance.
 - For short schedules the selector can run the selected pytest cases on a private copy of the changed paths. For longer schedules it can confirm a single test when its measured runtime is sufficiently below the schedule time it could save. A test can be removed when its setup, body, subtests and teardown all pass. Timeouts keep the outstanding candidates.
-- Explicit readers of edited source and fixtures remain eligible for evaluation. Edits that change lexical scope, malformed diffs, and interactions between multiple changed source modules use a broader schedule. IDs missing from the baseline inventory are always included.
+- Explicit readers of edited source and fixtures remain eligible for evaluation. For scalar substitutions across multiple deferred functions, the selector retains every observed caller of each entire function. Lexical changes, eager execution and unmodeled interactions retain the broader schedule. IDs missing from the baseline inventory are always included.
 
 Shorter workers can take additional related tests using their spare time without extending the schedule.
 
