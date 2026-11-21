@@ -216,6 +216,59 @@ def only_local_conditions(original, candidate, old, new):
     return match(before, after) and changed_guard
 
 
+def first_changed_blocks(old, new, old_ops, old_values, new_ops, new_values):
+    """Walk both ordinary control-flow graphs up to their first semantic differences."""
+    def handlers(code, operations):
+        positions = {op.offset: i for i, op in enumerate(operations)}
+        entries = tuple(dis.Bytecode(code).exception_entries)
+        result = {}
+        for entry in entries:
+            if entry.target not in positions:
+                return None
+            for position in range(entry.start, entry.end, 2):
+                if position in positions:
+                    result.setdefault(positions[position], (entry.depth, entry.lasti, positions[entry.target]))
+        return result
+    old_handlers, new_handlers = handlers(old, old_ops), handlers(new, new_ops)
+    if old_handlers is None or new_handlers is None:
+        return None
+    limit = 3 * (len(old_ops) + len(new_ops))
+    starts = block_starts(old)
+    changed = set()
+    pending = [(0, 0)]
+    visited = set()
+    unconditional = {"JUMP_FORWARD", "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"}
+    terminal = {"RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS", "RERAISE"}
+    while pending:
+        left, right = pending.pop()
+        if (left, right) in visited:
+            continue
+        visited.add((left, right))
+        if len(visited) > limit or not 0 <= left < len(old_ops) or not 0 <= right < len(new_ops):
+            return None
+        old_op, new_op = old_ops[left], new_ops[right]
+        left_handler, right_handler = old_handlers.get(left), new_handlers.get(right)
+        if left_handler and right_handler and left_handler[:2] == right_handler[:2]:
+            pending.append((left_handler[2], right_handler[2]))
+        if (left_handler or right_handler) and ((left_handler or ())[:2] != (right_handler or ())[:2]):
+            differs = True
+        elif old_op.opname != new_op.opname:
+            differs = True
+        elif old_op.opcode in dis.hasjump:
+            # Compare both successors. Physical offsets shift when a branch grows.
+            pending.append((old_values[left][1], new_values[right][1]))
+            if old_op.opname not in unconditional:
+                pending.append((left + 1, right + 1))
+            continue
+        else:
+            differs = old_values[left] != new_values[right]
+        if differs:
+            changed.add(starts[bisect.bisect_right(starts, old_op.offset) - 1])
+        elif old_op.opname not in terminal:
+            pending.append((left + 1, right + 1))
+    return changed
+
+
 class ExecutionIndex:
     def __init__(self, data, ids, children):
         if data["ids"] != ids:

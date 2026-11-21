@@ -62,6 +62,8 @@ The mixed-change selector now recognizes when the only change in one component i
 
 Existing workers take additional zero-duration tests. Shorter workers take related tests first, then other tests that fit the same integer-millisecond makespan.
 
+When the ordinary selector would schedule the full suite, it can intersect two observations of the unchanged upstream test suite. One records reachability separately for each test in a warm suite. The other records the full lifetime of independent pytest invocations, including imports, collection, execution, teardown and traced Python descendants. A test is eligible for removal only when both observations miss the changed original code and direct reads, caches and incomplete traces permit it. For suspended generators, any observed invocation retains its tests. The selector checks the source hash, interpreter version, OS, architecture and test inventory before using a cold map. It retains the full schedule unless the revised allocation saves at least one simulated second.
+
 The input is `/data/tests.json` and `/data/commits/*.patch`. Standard output contains one JSON object per patch. All checked-in observations come from the pinned checkout. The external scorer reads the sample answers.
 
 ## Rebuild the baseline maps
@@ -92,6 +94,16 @@ export PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 "$PY" tools/build_table_values.py "$SRC" "$TESTS" table-values.json.gz
 "$PY" tools/build_query_map.py "$SRC" query-map.json.gz
 "$PY" -I -B -S symbols.py --build-baseline "$SRC" symbols.json.gz symbol-baseline.sqlite3
+```
+
+Build cold coverage on the target architecture with the same dependency lock and pinned source. A selector can be a full pytest file or an individual node ID. Each collection must complete without failures, skips or missing child-process receipts. For example, these commands create a map for a parser test and a test module.
+
+```sh
+mkdir -p .cache/cold
+"$PY" tools/profile_cold_test.py "$SRC" tests/test_parser.py::TestParser::test_max_nodes .cache/cold/parser.json.gz
+"$PY" tools/profile_cold_test.py "$SRC" tests/test_serde.py .cache/cold/serde.json.gz
+COLD_MAP=$("$PY" -c 'import platform, sys; print(f"cold-{sys.platform}-{platform.machine()}.json.gz")')
+"$PY" tools/pack_cold_coverage.py "$SRC" coverage.json.gz "$COLD_MAP" .cache/cold/*.json.gz
 ```
 
 The contest organizers supply the sample patches, test manifest, dependency lock and scorer. SQLGlot supplies the test suite and fixtures used to generate the maps. [Organizer's kit](https://www.joinbuilders.org/buildathon/tracks/blast-radius/files/blast-radius-sample.tar.gz) · [Pinned SQLGlot source](https://github.com/tobymao/sqlglot/tree/eb11aec4be8cb2122afe713a4816662c3f0fb2fa)

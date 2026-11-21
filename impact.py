@@ -225,6 +225,7 @@ class ImpactIndex:
             raise ValueError("isolated test map uses another inventory")
         self.isolated = {path: int(bits, 16) for path, bits in deps["files"].items()}
         self.unknown = int(deps["unknown"], 16)
+        self.execution_ids = ids
         live = {test["id"]: test["number"] for test in tests}
         self.numbers = [live.get(name) for name in map_data["ids"]]
         self.test_files = {}
@@ -527,7 +528,7 @@ def _line_change(path, source, replaced, inserted, index):
     return selected
 
 
-def choose_tests(patch_text, index, tests=None, *, protected=None):
+def choose_tests(patch_text, index, tests=None, *, protected=None, prepared_changes=None):
     """Return numbers from the live test manifest, falling back for unmodelled changes."""
     if index is None:
         return {test["number"] for test in tests}
@@ -541,6 +542,8 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
         for change in changes:
             if change.path.endswith(".py"):
                 prepared = _prepare_change(change, index)
+                if prepared_changes is not None:
+                    prepared_changes[change.path] = prepared
                 baseline, _, candidate, _, _ = prepared
                 if same_syntax(baseline.tree, candidate):
                     bits |= index.reads.get(change.path, 0) | index.execution.child_reads.get(change.path, 0)

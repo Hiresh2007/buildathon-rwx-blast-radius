@@ -54,6 +54,12 @@ def fill_slack(workers, related, milliseconds):
             included.add(number)
 
 
+def schedule_cost(numbers, milliseconds):
+    workers = schedule(numbers, milliseconds)
+    maximum = max((sum(milliseconds[n] for n in worker) for worker in workers), default=0)
+    return 2000 * len(workers) + maximum
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path, nargs="?", default=Path("/data"))
@@ -68,6 +74,8 @@ def main():
     patches = {}
     selections = {}
     protected = {}
+    cold_only = set()
+    full_cost = None
     for path in sorted((args.data / "commits").glob("*.patch")):
         if time.monotonic() - started > 125:
             selections[path.stem] = index.all
@@ -79,12 +87,23 @@ def main():
             continue
         patches[path.stem] = patch
         protected[path.stem] = set()
-        selected = choose_tests(patch, index, tests, protected=protected[path.stem])
-        if selected != index.all and not protected[path.stem]:
+        prepared = {}
+        selected = choose_tests(patch, index, tests, protected=protected[path.stem], prepared_changes=prepared)
+        if selected == index.all:
+            from cold_coverage import unaffected
+            spared = unaffected(patch, index, prepared) - protected[path.stem]
+            if spared:
+                if full_cost is None:
+                    full_cost = schedule_cost(selected, milliseconds)
+                revised = selected - spared
+                if full_cost - schedule_cost(revised, milliseconds) >= 1000:
+                    selected = revised
+                    cold_only.add(path.stem)
+        elif not protected[path.stem]:
             selected = probe.select(patch, index, selected, milliseconds, schedule)
         selections[path.stem] = selected
     if time.monotonic() - started < 140:
-        candidates = {key: selections[key] for key in patches if selections[key] != index.all and not protected[key]}
+        candidates = {key: selections[key] for key in patches if selections[key] != index.all and not protected[key] and key not in cold_only}
         selections.update(refine(patches, candidates, index, tests, schedule))
     for key, selected in selections.items():
         selected = selected | protected.get(key, set())
