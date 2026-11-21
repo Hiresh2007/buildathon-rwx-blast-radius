@@ -1,6 +1,7 @@
 """Select candidate tests using only facts measured on the unchanged SQLGlot tree."""
 
 import ast
+import copy
 import gzip
 from io import BytesIO
 import json
@@ -13,8 +14,8 @@ from pathlib import Path, PurePosixPath
 
 from arguments import ArgumentIndex
 from cache_impact import CacheConsumers
-from default_impact import DefaultIndex
-from execution import ExecutionIndex, ScopeChange
+from default_impact import DefaultIndex, functions
+from execution import ExecutionIndex, ScopeChange, changes as changed_scopes, scalar_replacements
 from lookup_domains import LookupDomains
 from predicates import exemptions, load_domains
 from symbols import SymbolIndex
@@ -203,6 +204,11 @@ class ImpactIndex:
         self.unknown = int(deps["unknown"], 16)
         live = {test["id"]: test["number"] for test in tests}
         self.numbers = [live.get(name) for name in map_data["ids"]]
+        self.test_files = {}
+        self.test_names = {name.partition("[")[0] for name in ids}
+        for i, name in enumerate(ids):
+            path = name.partition("::")[0]
+            self.test_files[path] = self.test_files.get(path, 0) | (1 << i)
         self.unmeasured = set(live.values()).difference(self.numbers)
         self.all = set(live.values())
         self.all_bits = (1 << len(self.numbers)) - 1
@@ -332,6 +338,107 @@ def _prepare_change(change, index):
     return source, changed, tree, replaced, inserted
 
 
+def _units(tree, prefix=()):
+    """Index nonoverlapping class fields, function bodies and argument defaults."""
+    for i, node in enumerate(tree.body):
+        path = (*prefix, ("body", i))
+        if isinstance(node, ast.ClassDef):
+            yield from _units(node, path)
+        elif isinstance(node, ast.FunctionDef):
+            yield (*path, ("body", None)), (_body_start(node), node.end_lineno, node.body)
+            for name in ("defaults", "kw_defaults"):
+                for j, default in enumerate(getattr(node.args, name)):
+                    if isinstance(default, ast.Constant):
+                        yield (*path, ("args", None), (name, j)), (default.lineno, default.end_lineno, default)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            yield path, (node.lineno, node.end_lineno, node)
+
+
+def _unit_syntax(value):
+    return tuple(map(ast.dump, value)) if isinstance(value, list) else ast.dump(value)
+
+
+def _replace_unit(root, path, value):
+    # Copy just the list of statements on the path. Both input trees remain
+    # available to the source cache and the individual declaration checks.
+    node = copy.copy(root)
+    (field, i), *rest = path
+    original = getattr(root, field)
+    if i is None:
+        updated = _replace_unit(original, rest, value) if rest else value
+    else:
+        updated = original.copy()
+        updated[i] = _replace_unit(original[i], rest, value) if rest else value
+    setattr(node, field, updated)
+    return node
+
+
+def _separate_declarations(change, prepared):
+    source, changed, tree, replaced, inserted = prepared
+    if (inserted or not 2 <= len(replaced) <= 12 or not _balanced_replacements(change.hunks)
+            or all(source.runtime_scope(line) is not None for line in replaced)):
+        return [prepared]
+    originals = dict(_units(source.tree))
+    revisions = dict(_units(tree))
+    groups = {}
+    for path, (start, end, before) in originals.items():
+        lines = {line for line in replaced if start <= line <= end}
+        if not lines:
+            continue
+        if path not in revisions or type(before) is not type(revisions[path][2]):
+            return [prepared]
+        if _unit_syntax(before) != _unit_syntax(revisions[path][2]):
+            groups[path] = lines
+    if not 2 <= len(groups) <= 4:
+        return [prepared]
+    # Restoring the old nodes must reproduce the whole original syntax tree.
+    # This catches lines that move a declaration, change a decorator or alter
+    # parsing beyond the boundaries of an otherwise eligible replacement.
+    restored = tree
+    for path in groups:
+        restored = _replace_unit(restored, path, originals[path][2])
+    if ast.dump(restored) != source.syntax:
+        return [prepared]
+    return [(source, changed, _replace_unit(source.tree, path, revisions[path][2]), lines, set())
+            for path, lines in groups.items()]
+
+
+def _declaration_change(change, index, prepared, *, combined=False):
+    source, _, tree, replaced, inserted = prepared
+    setting = _setting_change(change.path, source, tree, replaced, inserted, index)
+    if setting is not None:
+        cold = index.isolated.get(change.path, index.all_bits) | index.unknown
+        return (setting | index.reads.get(change.path, 0) | index.execution.child_reads.get(change.path, 0)
+                | (cold & index.incomplete))
+    table = index.table_values.select(change.path, source, tree, replaced, inserted, index)
+    if table is not None:
+        return table
+    return index.defaults.select(change.path, source, tree, replaced, inserted, index, combined=combined)
+
+
+def _test_module_change(change, index, prepared):
+    path = change.path
+    if (path not in index.test_files or path not in index.isolated
+            or not PurePosixPath(path).name.startswith("test_")):
+        return None
+    source, _, tree, _, _ = prepared
+    if any(isinstance(n, ast.Name) and n.id == "pytest_plugins" for n in ast.walk(source.tree)):
+        return None
+    eligible = {(node.lineno, name) for name, node in functions(source.tree)
+                if node.name.startswith("test_") and not node.decorator_list
+                and f"{path}::{name.replace('.', '::')}" in index.test_names}
+    original = ExecutionIndex.baseline(source.text, path)
+    changed = changed_scopes(original, compile(tree, path, "exec", dont_inherit=True))
+    if not changed or any((before.co_firstlineno, before.co_qualname) not in eligible
+                          or not scalar_replacements(before, after) for before, after in changed):
+        return None
+    # Preserve the entire module, derived test classes, isolated imports and file
+    # readers. Pytest setup, fixtures, collection and shared helpers are outside
+    # this rule. Only existing test bodies may contain local substitutions.
+    return (index.test_files[path] | index.isolated[path] | index.unknown
+            | index.reads.get(path, 0) | index.execution.child_reads.get(path, 0))
+
+
 def _python_change(change, index, prepared):
     source, changed, tree, replaced, inserted = prepared
     reads = index.reads.get(change.path, 0)
@@ -339,16 +446,6 @@ def _python_change(change, index, prepared):
     # in its own clean process tree's dependency map.
     cold = index.isolated.get(change.path, 0) | index.unknown
     partial = index.incomplete & cold
-    setting = _setting_change(change.path, source, tree, replaced, inserted, index)
-    if setting is not None:
-        return setting | reads | partial
-    table_values = index.table_values.select(change.path, source, tree, replaced, inserted, index)
-    if table_values is not None:
-        return table_values
-    defaults = index.defaults.select(change.path, source, tree, replaced, inserted, index)
-    if defaults is not None:
-        return defaults
-
     line_bits = index.all_bits
     if _balanced_replacements(change.hunks):
         line_bits = _line_change(change.path, source, replaced, inserted, index)
@@ -417,16 +514,23 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
             return set(index.all)
         bits = 0
         code = []
+        test_changed = False
         for change in changes:
             if change.path.endswith(".py"):
                 prepared = _prepare_change(change, index)
                 baseline, _, candidate, _, _ = prepared
                 if baseline.syntax == ast.dump(candidate):
                     bits |= index.reads.get(change.path, 0) | index.execution.child_reads.get(change.path, 0)
+                elif change.path.startswith("tests/"):
+                    consumers = _test_module_change(change, index, prepared)
+                    if consumers is None:
+                        return set(index.all)
+                    bits |= consumers
+                    test_changed = True
                 elif not change.path.startswith("sqlglot/"):
                     return set(index.all)
                 else:
-                    code.append((change, prepared))
+                    code.extend((change, part) for part in _separate_declarations(change, prepared))
             elif change.path in index.reads:
                 # Every test that opens the changed fixture remains eligible, even
                 # when a source edit in this patch also alters its interpretation.
@@ -439,13 +543,17 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
             cache_bits = index.cache_consumers.floor(change.path, prepared[3], prepared[4])
             if cache_bits and protected is not None:
                 protected.update(index.tests_from_bits(cache_bits))
-            if len(code) == 1:
+            combined = len(code) > 1 or test_changed
+            declaration = _declaration_change(change, index, prepared, combined=combined)
+            if declaration is not None:
+                bits |= declaration | cache_bits
+            elif not combined:
                 bits |= _python_change(change, index, prepared) | cache_bits
             else:
                 # Before two edits can interact, the unchanged execution must
-                # reach a modified instruction. Each source must preserve its
-                # original calls, bindings and stores. Take the union
-                # of reached baseline blocks, retaining child and cache consumers.
+                # reach a modified instruction, load a changed configuration
+                # value, or omit a changed function argument. Use the union of
+                # these observations, retaining child and cache consumers.
                 # Operand-specific exemptions for independent edits cannot be
                 # combined: a value changed upstream may reach either function.
                 source, _, tree, _, _ = prepared

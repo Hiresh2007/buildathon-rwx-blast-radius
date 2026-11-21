@@ -136,7 +136,7 @@ class Defaults(TestTrace):
             key = path, name
             if key not in self.sites:
                 self.sites[key] = (fn.lineno, len(self.records))
-                self.records.append([[arg, n.lineno, n.value, [0] * 5] for arg, n in params])
+                self.records.append([[arg, n.lineno, n.value, [0] * 6] for arg, n in params])
             _, number = self.sites[key]
             # Replace only regular functions' scalar defaults. Inside the body,
             # restore the exact constant before the original first operation.
@@ -174,7 +174,11 @@ class Defaults(TestTrace):
                 flag = f"_rwx_was_omitted_{i}"
                 active.append(ast.copy_location(ast.Assign([ast.Name(flag, ast.Store())], missing), fn.body[0]))
                 restore = ast.Assign([ast.Name(arg, ast.Store())], original)
-                statements = [restore]
+                # A second file can change which later uses matter. Keep a separate
+                # mask for every call that actually omitted this argument.
+                omitted = ast.Expr(ast.Call(ast.Name("_rwx_default_use", ast.Load()),
+                                   [ast.Constant(number), ast.Constant(i), ast.Constant(5), original], []))
+                statements = [restore, omitted]
                 if arg in indirect:
                     statements.append(ast.Expr(ast.Call(ast.Name("_rwx_default_use", ast.Load()),
                                       [ast.Constant(number), ast.Constant(i), ast.Constant(0), original], [])))

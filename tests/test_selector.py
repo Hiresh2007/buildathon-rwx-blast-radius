@@ -8,11 +8,39 @@ from pathlib import Path
 import unittest
 
 from execution import ExecutionIndex, ScopeChange, changes, scalar_replacements
-from impact import ImpactIndex, choose_tests
+from impact import ImpactIndex, Source, _apply, _parse_diff, _separate_declarations, choose_tests
 from selector import fill_slack, schedule
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_separates_class_declaration_and_method_body_without_mutating_source(self):
+        path = "sqlglot/example.py"
+        old = 'class Model:\n    CONFIG = {"x": 1}\n\n    def value(self):\n        return 2\n'
+        updated = old.replace('"x": 1', '"x": 3').replace("return 2", "return 7")
+        change = _parse_diff(patch(path, old, updated))[0]
+        source = Source(old, path)
+        text, replaced, inserted = _apply(old, change.hunks)
+        tree = ast.parse(text)
+        parts = _separate_declarations(change, (source, text, tree, replaced, inserted))
+        self.assertEqual([p[3] for p in parts], [{2}, {5}])
+        self.assertEqual([ast.dump(p[2]) for p in parts],
+                         [ast.dump(ast.parse(old.replace('"x": 1', '"x": 3'))),
+                          ast.dump(ast.parse(old.replace('return 2', 'return 7')))])
+        self.assertEqual(ast.dump(source.tree), source.syntax)
+        self.assertEqual(ast.dump(tree), ast.dump(ast.parse(updated)))
+
+    def test_default_and_body_of_same_function_are_disjoint(self):
+        path = 'sqlglot/example.py'
+        old = 'def f(enabled=False):\n    return "old" if enabled else "same"\n'
+        new = old.replace('False', 'True').replace('"old"', '"new"')
+        change = _parse_diff(patch(path, old, new))[0]
+        text, lines, insertions = _apply(old, change.hunks)
+        parts = _separate_declarations(change, (Source(old, path), text, ast.parse(text), lines, insertions))
+        self.assertCountEqual([ast.dump(p[2]) for p in parts], [
+            ast.dump(ast.parse(old.replace('False', 'True'))),
+            ast.dump(ast.parse(old.replace('"old"', '"new"'))),
+        ])
+
     def test_zero_duration_tests_fit_existing_single_worker(self):
         durations = {0: 5, 1: 0, 2: 0, 3: 1}
         workers = schedule({0, 1}, durations)
@@ -110,6 +138,17 @@ class PinnedSourceTests(unittest.TestCase):
             old = self.index.source(name).text
             change += patch(name, old, old + '\nADDED_VALUE = 3\n')
         self.assertEqual(choose_tests(change, self.index), self.index.all)
+
+    def test_existing_test_body_keeps_module_and_source_readers(self):
+        file = 'tests/dialects/test_oracle.py'
+        old = self.index.source(file).text
+        new = old.replace('self.assertEqual(create.kind, "TABLE")', 'self.assertEqual(create.kind, "VIEW")', 1)
+        self.assertNotEqual(old, new)
+        selected = choose_tests(patch(file, old, new), self.index)
+        self.assertTrue(self.index.tests_from_bits(self.index.test_files[file]).issubset(selected))
+        self.assertNotEqual(selected, self.index.all)
+        eager = 'raise RuntimeError("collection")\n' + new
+        self.assertEqual(choose_tests(patch(file, old, eager), self.index), self.index.all)
 
 
 if __name__ == '__main__':

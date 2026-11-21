@@ -39,7 +39,7 @@ class OperandTests(unittest.TestCase):
             output = root / "defaults.gz"
             trace.save(output)
             index = DefaultIndex(output, list("abcd"))
-            self.assertEqual(index.files[path]["keep|value"], [1 | 4, 0, 0, 0, 0])
+            self.assertEqual(index.files[path]["keep|value"], [1 | 4, 0, 0, 0, 0, 1])
 
     def test_ternary_keeps_default_used_in_untaken_branch(self):
         with TemporaryDirectory() as directory:
@@ -95,6 +95,18 @@ class OperandTests(unittest.TestCase):
         )
         other = ast.parse(src.text.replace("False", "True").replace("return x", "return not x"))
         self.assertIsNone(domain.select(path, src, other, {1, 2}, set(), index))
+
+    def test_combined_changes_retain_every_omitted_call(self):
+        path = "sqlglot/sample.py"
+        src = Source("def f(x=False):\n    return not x\n", path)
+        data = {"ids": list("abc"), "complete": "7", "files": {
+            path: {"f|x": [1, ["4", "1", "0", "0", "0", "3"]]}}}
+        domain = self.load(DefaultIndex, data)
+        index = SimpleNamespace(all_bits=7, isolated={}, unknown=0, incomplete=0, reads={},
+                                execution=SimpleNamespace(child_reads={}, child_calls={}, untraced=0, child_complete=0))
+        candidate = ast.parse(src.text.replace("False", "True"))
+        self.assertEqual(domain.select(path, src, candidate, {1}, set(), index), 5)
+        self.assertEqual(domain.select(path, src, candidate, {1}, set(), index, combined=True), 7)
 
     def test_table_values_include_every_changed_key_and_whole_table_readers(self):
         path = "sqlglot/sample.py"

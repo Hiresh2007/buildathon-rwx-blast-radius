@@ -50,7 +50,7 @@ class DefaultIndex:
                     masks = [masks, "0", "0", "0", "0"]
                 entries[tag] = [int(value, 16) for value in masks]
 
-    def select(self, path, source, candidate, replaced, inserted, index):
+    def select(self, path, source, candidate, replaced, inserted, index, *, combined=False):
         if inserted or not replaced or not (replaced & self.lines.get(path, set())):
             return None
         before = {
@@ -82,7 +82,10 @@ class DefaultIndex:
                 unseen = (
                     ~self.complete | index.incomplete | (executions.untraced & ~executions.child_complete)
                 ) & cold
-                raw, truth, none, short_or, short_and = self.files[path][tag]
+                masks = self.files[path][tag]
+                if combined and len(masks) < 6:
+                    return None
+                raw, truth, none, short_or, short_and = masks[:5]
                 old_truth, new_truth = bool(old.value), bool(new.value)
                 uses = raw
                 if old_truth != new_truth:
@@ -95,6 +98,8 @@ class DefaultIndex:
                     uses |= short_or
                 if not old_truth or not new_truth:
                     uses |= short_and
+                if combined:
+                    uses = raw | masks[5]
                 return (
                     uses
                     | child

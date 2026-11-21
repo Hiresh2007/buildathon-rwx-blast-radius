@@ -16,8 +16,8 @@ make sample-docker
 | Selector | Public simulated seconds | Missed patches |
 | --- | ---: | ---: |
 | Organizer starter | 1,210.470 | 0 |
-| Previous entry, matched host run | 112.340 | 0 |
-| Current entry, matched host run | 106.777 | 0 |
+| Previous entry (`f402de9`), matched host run | 97.282 | 0 |
+| Current entry, matched host run | 97.282 | 0 |
 
 We also generated 14 independent changes across dialect settings, expression declarations, optimizer and generator code, and SQL fixtures. Each change was checked against the 1,620-test inventory. The selector covered all 1,140 failing test/patch pairs, including test files that failed to import, in 79.431 simulated seconds. The previous version took 251.008 seconds on the same changes.
 
@@ -25,7 +25,9 @@ A separate mutation to a shared generator dispatch table broke 1,339 tests and t
 
 Two further independent batches exercised the multi-file and operand selection rules. We ran every patch against all 1,620 tests. Nine multi-file mutations produced 25 failing test/patch pairs and took 123.853 simulated seconds, compared with 331.353 for the earlier selector. Twelve single-file mutations of lookup keys, fallback values and function defaults produced 39 failing pairs. One matched run took 93.792 seconds including selector CPU, compared with 264.686. Both batches had zero missed patches. Three additional edits to defaults controlling expression order, quoting and dialect handling produced 121 failing test/patch pairs, all included in the schedules.
 
-The latest ten-patch holdout combined six changes to parser and generator functions with four changes to dialect escape tables. Each patch ran against all 1,620 tests. Both versions covered all 15 failing test/patch pairs. The current version took 30.521 simulated seconds, down from 248.412. Including selector CPU, the cost fell from 254.883 to 38.779 seconds. Five further changes to PostgreSQL, BigQuery and Snowflake tables and week-start handling produced 12 failing test/patch pairs. The current schedules covered all 12 in 12.796 simulated seconds, down from 33.422.
+An earlier ten-patch holdout combined six changes to parser and generator functions with four changes to dialect escape tables. Each patch ran against all 1,620 tests. Both versions covered all 15 failing test/patch pairs. Version `f402de9` took 30.521 simulated seconds, down from 248.412. Including selector CPU, the cost fell from 254.883 to 38.779 seconds. Five further changes to PostgreSQL, BigQuery and Snowflake tables and week-start handling produced 12 failing test/patch pairs. Those schedules covered all 12 in 12.796 simulated seconds, down from 33.422.
+
+Ten further patches combined edits to different source files or test modules. The full suite produced 81 failing test/patch pairs. The current schedules included all 81 in 63.611 simulated seconds, compared with 368.170 for `f402de9`. Including selector CPU, the matched totals were 69.474 and 370.842 seconds. A separate eight-patch batch changed declarations and function bodies within the same file. Its schedules cost 79.725 simulated seconds, compared with 294.536 for `f402de9`.
 
 ## How it chooses tests
 
@@ -37,6 +39,8 @@ The latest ten-patch holdout combined six changes to parser and generator functi
 - For a literal string lookup on a built-in collection, it records the key sets seen by each test. A test can be ruled out when the changed key or fallback value leaves every observed lookup equivalent. Custom mappings and observations above the recording limits stay eligible.
 - For literal configuration dictionaries, the selector collects the keys read with subscripting and `get`. Whole-dictionary reads and unobserved processes stay eligible. The selector uses this map when an edit changes only the values of existing keys and preserves their built-in types.
 - For an edit to a scalar default argument, the trace distinguishes calls that omit the argument from calls that explicitly pass it. It records how the function used the default, including truth tests and comparisons with `None`. Tests that inspected the defaults, read the source, or ran unobserved subprocess code remain eligible.
+- For mixed patches, the selector combines readers of changed configuration values with callers that omitted changed defaults and tests that executed changed functions. It can analyze separate fields, defaults and function bodies in one file when restoring those nodes reproduces the complete original syntax tree. Any unsupported component uses the broader schedule.
+- A literal or operator change inside an existing, undecorated test function retains all tests in its module, along with every other test whose isolated process imported or read that module. Changes to collection, fixtures and shared test helpers use the full suite.
 - The longest executor tests contain independent TPC queries. When a function-body edit touches a recorded query phase, the selector can run that phase on the patched source and compare its output with the pinned result. The worker has a bounded CPU and wall-time allowance.
 - For short schedules the selector can run the selected pytest cases on a private copy of the changed paths. For longer schedules it can confirm a single test when its measured runtime is sufficiently below the schedule time it could save. A test can be removed when its setup, body, subtests and teardown all pass. Timeouts keep the outstanding candidates.
 - Explicit readers of edited source and fixtures remain eligible. When a patch changes constants or operators in multiple functions, the selector identifies the first bytecode blocks where execution could differ. It combines their observed test sets across files and retains subprocess and cache consumers. Changes to lexical scope, eager execution or instruction structure use a broader schedule. IDs missing from the baseline inventory are always included.
