@@ -64,6 +64,8 @@ Existing workers take additional zero-duration tests. Shorter workers take relat
 
 When the ordinary selector would schedule the full suite, it can intersect two observations of the unchanged upstream test suite. One records reachability separately for each test in a warm suite. The other records the full lifetime of independent pytest invocations, including imports, collection, execution, teardown and traced Python descendants. A test is eligible for removal only when both observations miss the changed original code and direct reads, caches and incomplete traces permit it. For suspended generators, any observed invocation retains its tests. The selector checks the source hash, interpreter version, OS, architecture and test inventory before using a cold map. It retains the full schedule unless the revised allocation saves at least one simulated second.
 
+For source changes combined with edits to existing optimizer SQL fixtures, the selector checks each fixture against its pinned contents. It retains every observed warm or cold reader as well as the tests reached by any source edit.
+
 The input is `/data/tests.json` and `/data/commits/*.patch`. Standard output contains one JSON object per patch. All checked-in observations come from the pinned checkout. The external scorer reads the sample answers.
 
 ## Rebuild the baseline maps
@@ -78,6 +80,7 @@ TESTS=.cache/kit/sample/tests.json
 "$PY" -m pip install -r .cache/kit/requirements.lock
 export PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 "$PY" tools/build_map.py "$SRC" "$TESTS" coverage.json.gz
+"$PY" tools/build_fixture_sources.py "$SRC" fixture-sources.json.gz
 "$PY" tools/build_cache_consumers.py "$SRC" cache-consumers.json.gz
 "$PY" tools/profile_pivots.py "$SRC" "$TESTS" pivot-times.json.gz
 "$PY" tools/build_execution.py "$SRC" "$TESTS" execution.json.gz

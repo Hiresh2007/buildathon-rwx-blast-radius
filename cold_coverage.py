@@ -11,7 +11,7 @@ import sys
 
 from execution import (ScopeChange, block_starts, bytecode_key, changes, first_changed_blocks,
                        instructions, scope_name)
-from impact import _parse_diff, _prepare_change
+from impact import _apply, _parse_diff, _prepare_change
 
 
 @lru_cache(maxsize=1)
@@ -34,6 +34,21 @@ def profile():
 @lru_cache(maxsize=40)
 def digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def fixture_sources():
+    try:
+        with gzip.open(Path(__file__).with_name('fixture-sources.json.gz'), 'rt') as stream:
+            records = json.load(stream)
+        return records if isinstance(records, dict) else {}
+    except (OSError, EOFError, UnicodeError, ValueError):
+        return {}
+
+
+def known_fixture(path, index):
+    return (path.startswith('tests/fixtures/optimizer/') and path.endswith('.sql')
+            and path in index.reads and path in fixture_sources())
 
 
 def changed_offsets(old, new):
@@ -90,10 +105,20 @@ def unaffected(text, index, prepared=None):
         changed_files = _parse_diff(text)
         paths = {change.path for change in changed_files}
         if (not paths or len(paths) != len(changed_files)
-                or any(not path.startswith("sqlglot/") or not path.endswith(".py") for path in paths)):
+                or any(not (path.startswith('sqlglot/') and path.endswith('.py') or known_fixture(path, index)) for path in paths)):
             return set()
         for change in changed_files:
             path = change.path
+            if known_fixture(path, index):
+                raw = (index.root / path).read_bytes()
+                if hashlib.sha256(raw).hexdigest() != fixture_sources().get(path):
+                    return set()
+                _apply(raw.decode('utf-8'), change.hunks)
+                groups &= ~int(data['reads'].get(path, '0'), 16)
+                warm &= ~(index.reads[path] | index.execution.child_reads.get(path, 0))
+                if not groups or not warm:
+                    return set()
+                continue
             entry = prepared.get(path) if prepared is not None else None
             source, _, tree, replaced, inserted = entry if entry is not None else _prepare_change(change, index)
             if data["hashes"].get(path) != digest(source.text):

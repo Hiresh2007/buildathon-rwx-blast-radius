@@ -61,6 +61,27 @@ class ColdCoverageTests(unittest.TestCase):
             index.execution.child_reads[self.path] = 4
             self.assertEqual(unaffected(self.delta(updated), index), set())
 
+    def test_mixed_sql_fixture_retains_both_cold_and_warm_fixture_readers(self):
+        index, data = self.fixture()
+        filename = 'tests/fixtures/optimizer/example.sql'
+        before = 'SELECT 1;\n'
+        after = 'SELECT 2;\n'
+        fixture_patch = ''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                                                     'a/' + filename, 'b/' + filename))
+        text = self.delta(self.old.replace('is not None', 'is None')) + fixture_patch
+        data['reads'][filename] = '1'
+        index.reads[filename] = 2
+        with TemporaryDirectory() as folder:
+            index.root = Path(folder)
+            fixture = index.root / filename
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text(before)
+            hashes = {filename: hashlib.sha256(fixture.read_bytes()).hexdigest()}
+            with patch('cold_coverage.profile', return_value=data), patch('cold_coverage.fixture_sources', return_value=hashes):
+                self.assertEqual(unaffected(text, index), {2})
+                fixture.write_text('SELECT 3;\n')
+                self.assertEqual(unaffected(text, index), set())
+
     def test_eager_changes_and_unmatched_sources_keep_the_entire_selection(self):
         index, data = self.fixture()
         with patch('cold_coverage.profile', return_value=data):

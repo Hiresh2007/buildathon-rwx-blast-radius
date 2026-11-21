@@ -59,7 +59,9 @@ def instrument():
             name = os.path.abspath(os.fsdecode(args[0]))
             if name.startswith(root) and args[2] & os.O_ACCMODE != os.O_WRONLY:
                 caller = sys._getframe(1).f_code
-                if not (caller.co_name == 'get_data' and 'importlib' in caller.co_filename):
+                module_read = (caller.co_name == 'get_data' and 'importlib' in caller.co_filename
+                               and name.endswith(('.py', '.pyc', '.so')))
+                if not module_read:
                     reads.add(name[len(root):])
 
     def save():
