@@ -16,14 +16,16 @@ make sample-docker
 | Selector | Public simulated seconds | Missed patches |
 | --- | ---: | ---: |
 | Organizer starter | 1,210.470 | 0 |
-| Previous entry | 340.483 | 0 |
-| Current entry | 106.965 | 0 |
+| Previous entry, matched host run | 112.340 | 0 |
+| Current entry, matched host run | 106.777 | 0 |
 
 We also generated 14 independent changes across dialect settings, expression declarations, optimizer and generator code, and SQL fixtures. Each change was checked against the 1,620-test inventory. The selector covered all 1,140 failing test/patch pairs, including test files that failed to import, in 79.431 simulated seconds. The previous version took 251.008 seconds on the same changes.
 
-A separate mutation to a shared generator dispatch table broke 1,339 tests and the final schedule included all of them. The public sample also passed in the pinned linux/amd64 image on an emulated x86 processor at 117.095 simulated seconds. Time-limited test runs can choose different schedules on slower hardware.
+A separate mutation to a shared generator dispatch table broke 1,339 tests and the schedule included all of them. Time-limited test runs can choose different schedules on slower hardware.
 
 Two further independent batches exercised the multi-file and operand selection rules. We ran every patch against all 1,620 tests. Nine multi-file mutations produced 25 failing test/patch pairs and took 123.853 simulated seconds, compared with 331.353 for the earlier selector. Twelve single-file mutations of lookup keys, fallback values and function defaults produced 39 failing pairs. One matched run took 93.792 seconds including selector CPU, compared with 264.686. Both batches had zero missed patches. Three additional edits to defaults controlling expression order, quoting and dialect handling produced 121 failing test/patch pairs, all included in the schedules.
+
+The latest ten-patch holdout combined six changes to parser and generator functions with four changes to dialect escape tables. Each patch ran against all 1,620 tests. Both versions covered all 15 failing test/patch pairs. The current version took 30.521 simulated seconds, down from 248.412. Including selector CPU, the cost fell from 254.883 to 38.779 seconds. Five further changes to PostgreSQL, BigQuery and Snowflake tables and week-start handling produced 12 failing test/patch pairs. The current schedules covered all 12 in 12.796 simulated seconds, down from 33.422.
 
 ## How it chooses tests
 
@@ -33,10 +35,11 @@ Two further independent batches exercised the multi-file and operand selection r
 - For required and optional expression arguments, the selector traces the validator’s actual inputs and checks which tests observe a missing key. Tests that inspect the schema directly remain eligible.
 - For simple comparisons and local boolean guards, the selector can rule out a test when every observed operand yields the same result before and after the edit. Unmeasured values keep the candidate.
 - For a literal string lookup on a built-in collection, it records the key sets seen by each test. A test can be ruled out when the changed key or fallback value leaves every observed lookup equivalent. Custom mappings and observations above the recording limits stay eligible.
-- For a single default-argument edit in an ordinary function or method, it records callers whose bound argument matched the old default. Tests that inspected or changed the function defaults, read the source, or ran unobserved subprocess code remain eligible.
+- For literal configuration dictionaries, the selector collects the keys read with subscripting and `get`. Whole-dictionary reads and unobserved processes stay eligible. The selector uses this map when an edit changes only the values of existing keys and preserves their built-in types.
+- For an edit to a scalar default argument, the trace distinguishes calls that omit the argument from calls that explicitly pass it. It records how the function used the default, including truth tests and comparisons with `None`. Tests that inspected the defaults, read the source, or ran unobserved subprocess code remain eligible.
 - The longest executor tests contain independent TPC queries. When a function-body edit touches a recorded query phase, the selector can run that phase on the patched source and compare its output with the pinned result. The worker has a bounded CPU and wall-time allowance.
 - For short schedules the selector can run the selected pytest cases on a private copy of the changed paths. For longer schedules it can confirm a single test when its measured runtime is sufficiently below the schedule time it could save. A test can be removed when its setup, body, subtests and teardown all pass. Timeouts keep the outstanding candidates.
-- Explicit readers of edited source and fixtures remain eligible for evaluation. For scalar substitutions across multiple deferred functions, the selector retains every observed caller of each entire function. Lexical changes, eager execution and unmodeled interactions retain the broader schedule. IDs missing from the baseline inventory are always included.
+- Explicit readers of edited source and fixtures remain eligible. When a patch changes constants or operators in multiple functions, the selector identifies the first bytecode blocks where execution could differ. It combines their observed test sets across files and retains subprocess and cache consumers. Changes to lexical scope, eager execution or instruction structure use a broader schedule. IDs missing from the baseline inventory are always included.
 
 Existing workers take additional zero-duration tests. Shorter workers take related tests first, then other tests that fit the same integer-millisecond makespan.
 
@@ -64,6 +67,7 @@ export PYTHON_CPU_COUNT=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 "$PY" tools/build_predicates.py "$SRC" "$TESTS" predicates.json.gz
 "$PY" tools/build_lookup_domains.py "$SRC" "$TESTS" lookup-domains.json.gz
 "$PY" tools/build_default_impact.py "$SRC" "$TESTS" default-impact.json.gz
+"$PY" tools/build_table_values.py "$SRC" "$TESTS" table-values.json.gz
 "$PY" tools/build_query_map.py "$SRC" query-map.json.gz
 "$PY" -I -B -S symbols.py --build-baseline "$SRC" symbols.json.gz symbol-baseline.sqlite3
 ```

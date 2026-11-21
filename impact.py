@@ -18,6 +18,7 @@ from execution import ExecutionIndex, ScopeChange
 from lookup_domains import LookupDomains
 from predicates import exemptions, load_domains
 from symbols import SymbolIndex
+from table_values import TableValues
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -193,6 +194,7 @@ class ImpactIndex:
         self.domains = load_domains(here / "predicates.json.gz", ids)
         self.arguments = ArgumentIndex(here / "arguments.json.gz", ids)
         self.defaults = DefaultIndex(here / "default-impact.json.gz", ids)
+        self.table_values = TableValues(here / "table-values.json.gz", ids)
         self.lookups = LookupDomains(here / "lookup-domains.json.gz", ids)
         deps = _read_map("dependencies.json.gz")
         if deps["ids"] != ids:
@@ -340,6 +342,9 @@ def _python_change(change, index, prepared):
     setting = _setting_change(change.path, source, tree, replaced, inserted, index)
     if setting is not None:
         return setting | reads | partial
+    table_values = index.table_values.select(change.path, source, tree, replaced, inserted, index)
+    if table_values is not None:
+        return table_values
     defaults = index.defaults.select(change.path, source, tree, replaced, inserted, index)
     if defaults is not None:
         return defaults
@@ -438,12 +443,13 @@ def choose_tests(patch_text, index, tests=None, *, protected=None):
                 bits |= _python_change(change, index, prepared) | cache_bits
             else:
                 # Before two edits can interact, the unchanged execution must
-                # reach at least one edited deferred function. Use every caller
-                # of each whole function, including child and cache consumers.
+                # reach a modified instruction. Each source must preserve its
+                # original calls, bindings and stores. Take the union
+                # of reached baseline blocks, retaining child and cache consumers.
                 # Operand-specific exemptions for independent edits cannot be
                 # combined: a value changed upstream may reach either function.
                 source, _, tree, _, _ = prepared
-                calls = index.execution.select(change.path, source.text, tree, whole_scopes=True)
+                calls = index.execution.select(change.path, source.text, tree, local_substitutions_only=True)
                 if calls is None:
                     return set(index.all)
                 cold = index.isolated.get(change.path, 0) | index.unknown

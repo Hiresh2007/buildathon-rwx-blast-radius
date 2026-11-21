@@ -43,9 +43,12 @@ class DefaultIndex:
         self.lines = {}
         for name, entries in self.files.items():
             self.lines[name] = set()
-            for tag, (line, mask) in entries.items():
+            for tag, (line, masks) in entries.items():
                 self.lines[name].add(line)
-                entries[tag] = int(mask, 16)
+                if isinstance(masks, str):
+                    # The original map recorded every matching call as a general use.
+                    masks = [masks, "0", "0", "0", "0"]
+                entries[tag] = [int(value, 16) for value in masks]
 
     def select(self, path, source, candidate, replaced, inserted, index):
         if inserted or not replaced or not (replaced & self.lines.get(path, set())):
@@ -79,8 +82,21 @@ class DefaultIndex:
                 unseen = (
                     ~self.complete | index.incomplete | (executions.untraced & ~executions.child_complete)
                 ) & cold
+                raw, truth, none, short_or, short_and = self.files[path][tag]
+                old_truth, new_truth = bool(old.value), bool(new.value)
+                uses = raw
+                if old_truth != new_truth:
+                    uses |= truth
+                if (old.value is None) != (new.value is None):
+                    uses |= none
+                # An earlier value in an 'or' is discarded when falsy. An
+                # earlier value in an 'and' is discarded when truthy.
+                if old_truth or new_truth:
+                    uses |= short_or
+                if not old_truth or not new_truth:
+                    uses |= short_and
                 return (
-                    self.files[path][tag]
+                    uses
                     | child
                     | unseen
                     | index.reads.get(path, 0)

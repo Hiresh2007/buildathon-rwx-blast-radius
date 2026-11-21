@@ -104,21 +104,46 @@ def changes(old, new):
     return changed
 
 
+def immutable_shape(before, after):
+    """Keep the exact built-in type and nesting of a loaded constant."""
+    if type(before) is not type(after):
+        return False
+    if type(before) in (bool, int, float, str, bytes, type(None)):
+        return True
+    if type(before) is tuple:
+        return len(before) == len(after) and all(immutable_shape(a, b) for a, b in zip(before, after))
+    if type(before) is frozenset:
+        # No iteration order is defined. Restrict sets to homogeneous primitive keys.
+        if not before or len(before) != len(after):
+            return False
+        key_type = type(next(iter(before)))
+        return (key_type in (bool, int, str, bytes)
+                and all(type(x) is key_type for items in (before, after) for x in items))
+    return False
+
+
 def scalar_replacements(old, new):
-    """Compare instructions with jump destinations and constants resolved."""
+    """Recognize local substitutions with the same calls, bindings and stores."""
     if old.co_names != new.co_names or old.co_exceptiontable != new.co_exceptiontable:
         return False
     old_ops, before = instructions(old)
     new_ops, after = instructions(new)
     if len(before) != len(after):
         return False
-    simple = (bool, int, float, str, bytes, type(None))
+    truth_jumps = {"POP_JUMP_IF_TRUE", "POP_JUMP_IF_FALSE"}
     for i, (left, right) in enumerate(zip(before, after)):
         if left == right:
             continue
         a, b = old_ops[i], new_ops[i]
-        if (a.opname not in ("LOAD_CONST", "RETURN_CONST") or a.opname != b.opname
-                or type(a.argval) not in simple or type(a.argval) is not type(b.argval)):
+        # Both conditional jumps pop the same value; the original branch is
+        # the earliest place at which a changed edge can affect execution.
+        if a.opname in truth_jumps and b.opname in truth_jumps:
+            continue
+        if a.opname != b.opname:
+            return False
+        if a.opname in ("COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_OP"):
+            continue
+        if a.opname not in ("LOAD_CONST", "RETURN_CONST") or not immutable_shape(a.argval, b.argval):
             return False
     return True
 
@@ -144,7 +169,7 @@ class ExecutionIndex:
     def baseline(source, path):
         return compile(source, path, "exec", dont_inherit=True)
 
-    def select(self, path, source, tree, *, whole_scopes=False):
+    def select(self, path, source, tree, *, local_substitutions_only=False):
         if not self.complete or path not in self.files or not path.startswith("sqlglot/"):
             return None
         try:
@@ -155,7 +180,7 @@ class ExecutionIndex:
         for old, new in changed:
             if old.co_flags & (0x20 | 0x80 | 0x200):
                 return None
-            if whole_scopes and (not self.compatible or not scalar_replacements(old, new)):
+            if local_substitutions_only and (not self.compatible or not scalar_replacements(old, new)):
                 # New calls, stores and control flow can introduce unmeasured
                 # interactions between modules or tests.
                 return None
@@ -172,7 +197,7 @@ class ExecutionIndex:
             if early:
                 return None
             possible = self.masks[calls]
-            if not whole_scopes and possible and self.compatible and bytecode_key(old) == fingerprint and old.co_exceptiontable == new.co_exceptiontable:
+            if possible and self.compatible and bytecode_key(old) == fingerprint and old.co_exceptiontable == new.co_exceptiontable:
                 before, a = instructions(old)
                 after, b = instructions(new)
                 if len(a) == len(b) and old.co_names == new.co_names:

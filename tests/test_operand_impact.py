@@ -9,6 +9,7 @@ import unittest
 from default_impact import DefaultIndex
 from impact import Source
 from lookup_domains import LookupDomains, lookup, site
+from table_values import TableValues
 from tools.build_default_impact import Defaults
 
 
@@ -21,7 +22,7 @@ class OperandTests(unittest.TestCase):
             tests = [dict(id=i, number=n) for n, i in enumerate("abcd")]
             trace = Defaults(root, tests)
             tree = trace.instrument(ast.parse(src), path)
-            namespace = {"_rwx_observe_defaults": trace.at_entry}
+            namespace = {"_rwx_default_missing": object(), "_rwx_default_use": trace.use}
             exec(compile(tree, str(root / path), "exec"), namespace)
             keep = namespace["keep"]
             trace.collecting = False
@@ -38,7 +39,20 @@ class OperandTests(unittest.TestCase):
             output = root / "defaults.gz"
             trace.save(output)
             index = DefaultIndex(output, list("abcd"))
-            self.assertEqual(index.files[path]["keep|value"], 1 | 4 | 8)
+            self.assertEqual(index.files[path]["keep|value"], [1 | 4, 0, 0, 0, 0])
+
+    def test_ternary_keeps_default_used_in_untaken_branch(self):
+        with TemporaryDirectory() as directory:
+            path = "sqlglot/sample.py"
+            trace = Defaults(Path(directory), [dict(id="one", number=0)])
+            source = "def select(value=False):\n    return value if value else False\n"
+            tree = trace.instrument(ast.parse(source), path)
+            namespace = {"_rwx_default_missing": object(), "_rwx_default_use": trace.use}
+            exec(compile(tree, path, "exec"), namespace)
+            trace.collecting = False
+            with trace.context(1):
+                self.assertFalse(namespace["select"]())
+            self.assertEqual(trace.records[0][0][3][1], 1)
 
     def load(self, cls, records):
         with TemporaryDirectory() as directory:
@@ -81,6 +95,19 @@ class OperandTests(unittest.TestCase):
         )
         other = ast.parse(src.text.replace("False", "True").replace("return x", "return not x"))
         self.assertIsNone(domain.select(path, src, other, {1, 2}, set(), index))
+
+    def test_table_values_include_every_changed_key_and_whole_table_readers(self):
+        path = "sqlglot/sample.py"
+        src = Source('class Config:\n    ITEMS = {"a": (0.0,), "b": (2,), "c": (3,)}\n', path)
+        data = {"ids": list("abcde"), "complete": "1f", "files": {
+            path: {"Config.ITEMS": ["8", {"a": "1", "b": "2", "c": "4"}]}}}
+        domain = self.load(TableValues, data)
+        index = SimpleNamespace(all_bits=31, isolated={}, unknown=0, incomplete=0,
+                                reads={}, execution=SimpleNamespace(child_reads={}))
+        changed = ast.parse(src.text.replace("0.0", "-0.0").replace("2,", "12,"))
+        self.assertEqual(domain.select(path, src, changed, {2}, set(), index), 1 | 2 | 8)
+        changed = ast.parse(src.text.replace("0.0", "False").replace("2,", "12,"))
+        self.assertIsNone(domain.select(path, src, changed, {2}, set(), index))
 
     def test_child_calls_use_original_definition_location(self):
         path = "sqlglot/sample.py"
