@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 import unittest
 
-from ast_syntax import same_syntax
+from ast_syntax import same_module_syntax, same_syntax
 from execution import ExecutionIndex, ScopeChange, changes, only_local_conditions, scalar_replacements
 from impact import ImpactIndex, Source, _apply, _parse_diff, _separate_declarations, _statements, choose_tests
 from selector import fill_slack, schedule
@@ -97,6 +97,15 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(same_syntax(ast.Constant(-0.0), ast.Constant(0.0)))
         self.assertFalse(same_syntax(ast.parse('def f(x): return x'), ast.parse('def f(y): return y')))
         self.assertFalse(same_syntax(ast.parse('x = 1'), ast.parse('x = 1; x = 2')))
+
+    def test_changed_statement_is_only_a_hint_for_whole_module_equality(self):
+        source = "class A:\n    def f(self):\n        return 1\n\nclass B:\n    value = 3\n"
+        a = ast.parse(source)
+        for other in (source, source.replace("return 1", "return 2"), source.replace("= 3", "= 4"),
+                      source.replace("    value = 3", "    value = 3\n    third = 7")):
+            b = ast.parse(other)
+            for hint in (0, 1, 2, 3, 4, 5, 6, 50):
+                self.assertEqual(same_module_syntax(a, b, hint), same_syntax(a, b))
 
     def test_membership_operand_can_change_length(self):
         def code(expression):

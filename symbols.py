@@ -161,19 +161,21 @@ def _approved_factory(fn):
 
 
 def declarations(path, old_tree, new_tree, known, factories=None):
+    from ast_syntax import same_syntax
+
     changed = []
 
     def visit(before, after, scope):
         if len(before) != len(after):
             return False
         for a, b in zip(before, after):
-            if _signature(a) == _signature(b):
+            if same_syntax(a, b):
                 continue
             if type(a) is not type(b):
                 return False
             if isinstance(a, ast.ClassDef):
                 if any(
-                    _signature(getattr(a, k)) != _signature(getattr(b, k))
+                    not same_syntax(getattr(a, k), getattr(b, k))
                     for k in a._fields
                     if k != "body"
                 ):
@@ -184,7 +186,7 @@ def declarations(path, old_tree, new_tree, known, factories=None):
             if not isinstance(a, (ast.Assign, ast.AnnAssign)):
                 return False
             if any(
-                _signature(getattr(a, k)) != _signature(getattr(b, k)) for k in a._fields if k != "value"
+                not same_syntax(getattr(a, k), getattr(b, k)) for k in a._fields if k != "value"
             ):
                 return False
             ts = a.targets if isinstance(a, ast.Assign) else [a.target]

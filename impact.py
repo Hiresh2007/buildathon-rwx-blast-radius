@@ -14,7 +14,7 @@ from functools import cached_property, lru_cache
 from pathlib import Path, PurePosixPath
 
 from arguments import ArgumentIndex
-from ast_syntax import same_syntax
+from ast_syntax import same_module_syntax, same_syntax
 from cache_impact import CacheConsumers
 from default_impact import DefaultIndex, functions
 from execution import ExecutionIndex, ScopeChange, changes as changed_scopes, compiled_candidate, scalar_replacements
@@ -544,8 +544,9 @@ def choose_tests(patch_text, index, tests=None, *, protected=None, prepared_chan
                 prepared = _prepare_change(change, index)
                 if prepared_changes is not None:
                     prepared_changes[change.path] = prepared
-                baseline, _, candidate, _, _ = prepared
-                if same_syntax(baseline.tree, candidate):
+                baseline, _, candidate, replaced, inserted = prepared
+                hint = min(replaced or inserted, default=0)
+                if same_module_syntax(baseline.tree, candidate, hint):
                     bits |= index.reads.get(change.path, 0) | index.execution.child_reads.get(change.path, 0)
                 elif change.path.startswith("tests/"):
                     consumers = _test_module_change(change, index, prepared)

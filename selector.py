@@ -1,6 +1,7 @@
 """Select affected SQLGlot tests and print one worker schedule per patch."""
 
 import argparse
+import gc
 import gzip
 import json
 import math
@@ -138,4 +139,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Parsing a module creates many short-lived AST nodes. Keep cyclic GC enabled
+    # while avoiding repeated scans of live source trees during a single patch.
+    gc.set_threshold(8000, *gc.get_threshold()[1:])
     main()
