@@ -145,9 +145,30 @@ def test_sources():
         return {}
 
 
+def literal_test_body(node, helpers):
+    receiver = node.args.args[0].arg
+    for stmt in node.body:
+        if not isinstance(stmt, ast.Expr):
+            return False
+        call = stmt.value
+        if isinstance(call, ast.Constant) and isinstance(call.value, str):
+            continue
+        if (not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute)
+                or call.func.attr not in helpers or not isinstance(call.func.value, ast.Name)
+                or call.func.value.id != receiver or any(kw.arg is None for kw in call.keywords)):
+            return False
+        for argument in [*call.args, *(kw.value for kw in call.keywords)]:
+            if not all(isinstance(n, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Load)) for n in ast.walk(argument)):
+                return False
+    return True
+
+
 def only_added_tests(old, new, classes):
     if len(old.body) != len(new.body):
         return False
+    validators = {alias.asname or alias.name for node in old.body if isinstance(node, ast.ImportFrom)
+                  and node.level == 0 and node.module == "tests.dialects.test_dialect" for alias in node.names
+                  if alias.name == "Validator"}
     added = False
     for a, b in zip(old.body, new.body):
         if same_syntax(a, b):
@@ -158,13 +179,16 @@ def only_added_tests(old, new, classes):
             return False
         existing = {n.name for n in a.body if declaration_key(n)}
         existing.update(n.id for n in ast.walk(a) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+        if len(a.bases) != 1 or not isinstance(a.bases[0], ast.Name) or a.bases[0].id not in validators:
+            return False
+        helpers = {"validate_all", "validate_identity", "assertEqual", "assertTrue", "assertFalse"} - existing
         retained = []
         for item in b.body:
             if (isinstance(item, ast.FunctionDef) and item.name.startswith("test_") and item.name not in existing
                     and not item.decorator_list and item.returns is None and not item.type_params
                     and not item.args.defaults and not item.args.kwonlyargs and not item.args.posonlyargs
                     and not item.args.vararg and not item.args.kwarg and len(item.args.args) == 1
-                    and item.args.args[0].annotation is None):
+                    and item.args.args[0].annotation is None and literal_test_body(item, helpers)):
                 existing.add(item.name)
                 added = True
                 continue

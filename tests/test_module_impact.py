@@ -49,7 +49,7 @@ class ModuleBoundaryTests(unittest.TestCase):
         self.assertIsNone(self.declarations(old, old + "def _helper(): return 3\n"))
 
     def test_only_plain_new_tests_in_known_existing_classes_are_eligible(self):
-        old = "class TestParser(Validator):\n    def test_original(self): pass\n"
+        old = "from tests.dialects.test_dialect import Validator\nclass TestParser(Validator):\n    def test_original(self): pass\n"
         new = old + "    def test_added(self):\n        self.assertEqual(2, 2)\n"
         eligible = lambda text: only_added_tests(ast.parse(old), ast.parse(text), {"TestParser"})
         self.assertTrue(eligible(new))
@@ -57,6 +57,9 @@ class ModuleBoundaryTests(unittest.TestCase):
                      new.replace("def test_added", "@pytest.mark.usefixtures('shared')\n    def test_added"),
                      new.replace("test_added(self)", "test_added(self, value=factory())"),
                      new.replace("def test_original(self): pass", "def test_original(self): raise RuntimeError"),
+                     new.replace("self.assertEqual(2, 2)", "self.env.shared = 42"),
+                     new.replace("self.assertEqual(2, 2)", "self.assertEqual(change_state(), 2)"),
+                     new.replace("self.assertEqual(2, 2)", "self.configure(2)"),
                      new + "    def test_added(self): pass\n"):
             self.assertFalse(eligible(text))
         self.assertFalse(only_added_tests(ast.parse(old), ast.parse(new), {"Other"}))
