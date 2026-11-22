@@ -11,6 +11,7 @@ import sys
 from ast_syntax import same_syntax
 from cold_coverage import digest, profile
 from deferred_calls import observed_calls
+from forwarding_decorators import deferred_decorators
 from impact import _apply, _parse_diff
 from symbols import _factory_form, _module, _signature, declarations as declared_fields
 
@@ -121,11 +122,6 @@ def can_yield(node):
     return False
 
 
-def plain_decorators(node):
-    return all(isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod", "property")
-               for d in node.decorator_list)
-
-
 def simple_function(node, postponed):
     if node.name.startswith("__") or node.type_params:
         return False
@@ -181,7 +177,7 @@ def declarations(path, old, new, import_lines, operands=None):
             if a is not None and any(a.body[0].lineno <= line <= a.end_lineno for line in import_lines):
                 return False
             if a is not None and b is not None:
-                if (type(a) is not type(b) or not plain_decorators(a) or can_yield(a) != can_yield(b)
+                if (type(a) is not type(b) or not deferred_decorators(a, old, new) or can_yield(a) != can_yield(b)
                         or not all(same_syntax(getattr(a, field), getattr(b, field))
                         for field in a._fields if field != "body") or ast.get_docstring(a, clean=False) != ast.get_docstring(b, clean=False)):
                     return False
