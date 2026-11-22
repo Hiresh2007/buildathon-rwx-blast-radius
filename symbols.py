@@ -19,7 +19,7 @@ import textwrap
 import tempfile
 import sysconfig
 import time
-from types import CodeType, FunctionType
+from types import CodeType, FunctionType, ModuleType
 
 
 def _module(path):
@@ -625,6 +625,42 @@ class SymbolIndex:
         return bits
 
 
+def passive_key(value):
+    if type(value) in (str, int, bool, type(None), type):
+        return True
+    cls = type(value)
+    return (isinstance(value, enum.Enum) and cls.__eq__ in (int.__eq__, object.__eq__)
+            and cls.__hash__ in (int.__hash__, enum.Enum.__hash__))
+
+
+def verified_operand(module, owner, field, kind, path, changed_modules):
+    names = path.split(".")
+    cls = vars(module)[owner]
+    if names[0] in vars(cls) or names[0] not in vars(module):
+        return False
+    value = vars(module)[names[0]]
+    if kind == "factory":
+        return (type(value) is FunctionType and value.__module__ not in changed_modules
+                and _factory_bound_to(f"{module.__name__}:{owner}.{field}", names[0]))
+    for name in names[1:]:
+        if type(value) is ModuleType:
+            if name not in vars(value):
+                return False
+            value = vars(value)[name]
+        elif type(value) in (type, enum.EnumType):
+            try:
+                value = inspect.getattr_static(value, name)
+            except AttributeError:
+                return False
+        else:
+            return False
+    if kind == "key":
+        return passive_key(value)
+    if kind == "set":
+        return type(value) in (set, frozenset) and all(passive_key(v) for v in value)
+    return kind == "reference" and (passive_key(value) or type(value) in (FunctionType, classmethod, staticmethod))
+
+
 def verify_declarations(root):
     payload = json.load(sys.stdin)
     files = {_module(path): (path, source) for path, source in payload["files"].items()}
@@ -646,6 +682,9 @@ def verify_declarations(root):
         module = sys.modules[_module(path)]
         if not Path(module.__file__).samefile(root / path):
             return
+        for owner, field, kind, reference in payload.get("operands", {}).get(path, ()):
+            if not verified_operand(module, owner, field, kind, reference, files):
+                return
         for name in names:
             if not name:
                 continue

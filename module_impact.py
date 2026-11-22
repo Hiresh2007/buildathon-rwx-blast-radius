@@ -1,5 +1,6 @@
 """Conservative file-level fallback for changes confined to deferred declarations."""
 import ast
+from collections import Counter
 from functools import lru_cache
 import gzip
 import json
@@ -9,8 +10,8 @@ import sys
 
 from ast_syntax import same_syntax
 from cold_coverage import digest, profile
-from impact import _parse_diff
-from symbols import _module, _signature
+from impact import _apply, _parse_diff
+from symbols import _factory_form, _module, _signature
 
 
 def declaration_key(node):
@@ -19,24 +20,82 @@ def declaration_key(node):
     return None
 
 
-def dispatch_change(old, new):
+def attribute_path(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        if node.attr.startswith("__"):
+            return None
+        parts.append(node.attr)
+        node = node.value
+    if not parts or len(parts) > 3 or not isinstance(node, ast.Name) or node.id.startswith("__"):
+        return None
+    return ".".join([node.id, *reversed(parts)])
+
+
+def passive_operand(node, kind, checks):
+    if isinstance(node, ast.Constant) and type(node.value) in (str, int, bool, type(None)):
+        return True
+    path = attribute_path(node)
+    if path and checks is not None:
+        checks.add((kind, path))
+        return True
+    return False
+
+
+def set_expression(old, new, checks):
+    if isinstance(old, ast.Set) and isinstance(new, ast.Set):
+        return all(passive_operand(n, "key", checks) for n in [*old.elts, *new.elts])
+    if (isinstance(old, ast.BinOp) and isinstance(new, ast.BinOp) and type(old.op) is type(new.op)
+            and isinstance(old.op, (ast.BitOr, ast.BitAnd, ast.Sub))):
+        return set_expression(old.left, new.left, checks) and set_expression(old.right, new.right, checks)
+    path = attribute_path(old)
+    if checks is not None and path and same_syntax(old, new):
+        checks.add(("set", path))
+        return True
+    return False
+
+
+def dispatch_change(old, new, checks=None):
     if not isinstance(old, ast.Assign) or not isinstance(new, ast.Assign):
         return False
     if (not same_syntax(old.targets, new.targets) or len(old.targets) != 1
             or not isinstance(old.targets[0], ast.Name) or not old.targets[0].id.isupper()):
         return False
     if not isinstance(old.value, ast.Dict) or not isinstance(new.value, ast.Dict):
-        return False
-    # Every preexisting expression with possible effects must remain in its original
-    # relative order. Only string keys bound to unevaluated lambdas may change.
-    def split(value):
-        fixed = []
-        for key, item in zip(value.keys, value.values):
-            if (not isinstance(key, ast.Constant) or type(key.value) is not str
-                    or not isinstance(item, ast.Lambda) or item.args.defaults or any(item.args.kw_defaults)):
-                fixed.append((_signature(key), _signature(item)))
-        return fixed
-    return split(old.value) == split(new.value)
+        return set_expression(old.value, new.value, checks)
+
+    def entries(mapping):
+        grouped = []
+        for key, item in zip(mapping.keys, mapping.values):
+            grouped.append(((_signature(key), _signature(item)), key, item))
+        return grouped
+
+    before, after = entries(old.value), entries(new.value)
+    common = Counter(row[0] for row in before) & Counter(row[0] for row in after)
+    factories = {_factory_form(value) for _, _, value in before}
+
+    def retained(rows):
+        remaining = common.copy()
+        ordered = []
+        for fingerprint, key, value in rows:
+            if remaining[fingerprint]:
+                remaining[fingerprint] -= 1
+                ordered.append(fingerprint)
+                continue
+            if not passive_operand(key, "key", checks):
+                return None
+            if isinstance(value, ast.Lambda) and not value.args.defaults and not any(value.args.kw_defaults):
+                continue
+            if passive_operand(value, "reference", checks):
+                continue
+            form = _factory_form(value)
+            if checks is None or form is None or form not in factories:
+                return None
+            checks.add(("factory", form[0]))
+        return ordered
+
+    left, right = retained(before), retained(after)
+    return left is not None and left == right
 
 
 def deferred_suffix(body, names, postponed):
@@ -78,7 +137,7 @@ def simple_function(node, postponed):
     return postponed or (node.returns is None and all(arg is None or arg.annotation is None for arg in args))
 
 
-def declarations(path, old, new, import_lines):
+def declarations(path, old, new, import_lines, operands=None):
     dialect = path.startswith(("sqlglot/parsers/", "sqlglot/generators/"))
     postponed = any(isinstance(n, ast.ImportFrom) and n.module == "__future__"
                     and any(alias.name == "annotations" for alias in n.names) for n in old.body)
@@ -128,7 +187,12 @@ def declarations(path, old, new, import_lines):
                         or not visit(a.body, b.body, a.name)
                         or (a.name in verify and (a is not before[-1] or b is not after[-1]))):
                     return False
-            elif dialect and owner and dispatch_change(a, b):
+            elif dialect and owner:
+                local = set() if operands is not None else None
+                if not dispatch_change(a, b, local):
+                    return False
+                if local:
+                    operands.update((owner, a.targets[0].id, kind, name) for kind, name in local)
                 verify.add(owner)
             else:
                 return False
@@ -245,7 +309,26 @@ def boundary_selection(text, index, prepared, selected, price, protected):
     data = profile()
     if not data or data["ids"] != index.execution_ids:
         return selected
+    try:
+        changes = _parse_diff(text)
+        paths = {change.path for change in changes}
+        if len(paths) != len(changes) or not set(prepared) <= paths:
+            return selected
+        fixtures = [change for change in changes if change.path not in prepared]
+        if any(not change.path.startswith("tests/fixtures/") or not change.path.endswith(".sql")
+               or change.path not in index.reads or change.path not in index.isolated for change in fixtures):
+            return selected
+    except (OSError, UnicodeError, ValueError):
+        return selected
     bits = 0
+    for change in fixtures:
+        path = change.path
+        bits |= index.reads[path] | index.isolated[path] | index.execution.child_reads.get(path, 0)
+        bits |= index.incomplete | index.unknown | index.execution.untraced
+        read_groups = int(data["reads"].get(path, "0"), 16)
+        for i, members in enumerate(data["groups"]):
+            if read_groups & (1 << i):
+                bits |= int(members, 16)
     for path, (_, _, _, replaced, inserted) in prepared.items():
         if path in index.test_files:
             bits |= index.test_files[path] | index.isolated.get(path, index.all_bits) | index.unknown
@@ -260,10 +343,10 @@ def boundary_selection(text, index, prepared, selected, price, protected):
     if saved_ms < 2000:
         return selected
     checks = {}
+    operands = {}
     try:
-        changes = _parse_diff(text)
-        if len(changes) != len(prepared) or {change.path for change in changes} != set(prepared):
-            return selected
+        for change in fixtures:
+            _apply((index.root / change.path).read_text(encoding="utf-8"), change.hunks)
         for path, (source, changed, tree, _, _) in prepared.items():
             if path in index.test_files:
                 classes = {name.split("::")[1] for name in index.execution_ids
@@ -273,13 +356,16 @@ def boundary_selection(text, index, prepared, selected, price, protected):
                 continue
             if data["hashes"].get(path) != digest(source.text):
                 return selected
-            names = declarations(path, source.tree, tree, index.import_lines.get(path, set()))
+            local = set()
+            names = declarations(path, source.tree, tree, index.import_lines.get(path, set()), local)
+            if local:
+                operands[path] = sorted(local)
             if names is None:
                 return selected
             if names:
                 checks[path] = sorted(names)
         if checks:
-            payload = {"files": {path: entry[1] for path, entry in prepared.items() if path not in index.test_files}, "classes": checks}
+            payload = {"files": {path: entry[1] for path, entry in prepared.items() if path not in index.test_files}, "classes": checks, "operands": operands}
             done = subprocess.run([sys.executable, "-I", "-B", "-S", str(Path(__file__).with_name("symbols.py")),
                                    "--verify-declarations", str(index.root)], input=json.dumps(payload), text=True,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
