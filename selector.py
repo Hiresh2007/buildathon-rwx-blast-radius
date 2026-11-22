@@ -101,6 +101,7 @@ def main():
                     cold_only.add(path.stem)
         elif not protected[path.stem]:
             selected = probe.select(patch, index, selected, milliseconds, schedule)
+            selected = probe.exclude_unentered_branches(patch, index, selected, prepared)
         selections[path.stem] = selected
     if time.monotonic() - started < 140:
         candidates = {key: selections[key] for key in patches if selections[key] != index.all and not protected[key] and key not in cold_only}

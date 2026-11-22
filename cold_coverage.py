@@ -9,7 +9,7 @@ from pathlib import Path
 import platform
 import sys
 
-from execution import (ScopeChange, block_starts, bytecode_key, changes, first_changed_blocks,
+from execution import (ScopeChange, block_starts, bytecode_key, changes, compiled_candidate, first_changed_blocks,
                        instructions, scope_name)
 from impact import _parse_diff, _prepare_change
 
@@ -104,7 +104,7 @@ def unaffected(text, index, prepared=None):
             if not groups or not warm:
                 return set()
             baseline = index.execution.baseline(source.text, path)
-            candidate = compile(tree, path, "exec", dont_inherit=True)
+            candidate = compiled_candidate(tree, path)
             for old, new in changes(baseline, candidate):
                 if old.co_flags & (inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR):
                     return set()

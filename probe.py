@@ -1,6 +1,8 @@
 """Bounded replay of affected independent queries in expensive SQLGlot executor tests."""
 
 import ast
+import inspect
+import hashlib
 from ast_syntax import same_syntax
 import gzip
 import importlib.abc
@@ -11,7 +13,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from functools import lru_cache
 
+from execution import ScopeChange, changes as changed_scopes, compiled_candidate, scope_name
 from impact import _apply, _parse_diff
 from replay_phases import verify
 
@@ -62,6 +66,65 @@ def worker():
     verify(root, request["checks"], request["records"])
 
 
+def inserted_branch_entry(source, candidate, path, anchor, added_lines, execution):
+    """Locate new statements at the start of an existing conditional suite."""
+    scope = source.runtime_scope(anchor)
+    if not isinstance(scope, ast.FunctionDef) or added_lines < 1:
+        return None
+    if not any(isinstance(node, ast.If) and node.lineno < anchor
+               and any(suite and suite[0].lineno == anchor for suite in (node.body, node.orelse))
+               for node in ast.walk(scope)):
+        return None
+    # Compare the complete module after removing just the newly inserted statements.
+    # Source locations alone do not distinguish an insertion from a reindented suite.
+    for branch in ast.walk(candidate):
+        if not isinstance(branch, ast.If):
+            continue
+        for suite in (branch.body, branch.orelse):
+            if not suite or suite[0].lineno != anchor:
+                continue
+            count = 0
+            while count < len(suite) and suite[count].end_lineno < anchor + added_lines:
+                count += 1
+            if not count or count == len(suite) or suite[count].lineno != anchor + added_lines:
+                continue
+            inserted = suite[:count]
+            del suite[:count]
+            try:
+                matched = same_syntax(candidate, source.tree)
+            finally:
+                suite[:0] = inserted
+            if not matched:
+                continue
+            try:
+                edits = changed_scopes(execution.baseline(source.text, path),
+                                       compiled_candidate(candidate, path))
+            except (ScopeChange, ValueError):
+                return None
+            if len(edits) != 1:
+                return None
+            old, _ = edits[0]
+            if old.co_name != scope.name or old.co_flags & (
+                    inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR):
+                return None
+            return scope_name(old)
+    return None
+
+
+@lru_cache(maxsize=1)
+def recorded_entries(index):
+    try:
+        with gzip.open(Path(__file__).with_name("executor-entries.json.gz"), "rt") as stream:
+            data = json.load(stream)
+    except (OSError, EOFError, UnicodeError, ValueError):
+        return {}
+    if (data["python"] != sys.implementation.cache_tag or data["version"] != list(sys.version_info[:3])
+            or data["targets"] != list(GROUPS)
+            or data["inventory"] != hashlib.sha256("\n".join(index.execution_ids).encode()).hexdigest()):
+        return {}
+    return data["files"]
+
+
 class QueryProbe:
     def __init__(self, tests):
         with gzip.open(Path(__file__).with_name("query-map.json.gz"), "rt") as stream:
@@ -75,6 +138,50 @@ class QueryProbe:
         self.setup_bit = 1 << (4 * len(self.cases))
         self.budget = 32  # total worker CPU cap for the batch
         self.deadline = time.monotonic() + 60
+
+    def exclude_unentered_branches(self, text, index, selected, prepared):
+        """Keep executor tests whose baseline reached the insertion in any query phase."""
+        if len(prepared) != 1 or selected.isdisjoint(self.numbers.values()):
+            return selected
+        path, (source, changed, tree, replaced, inserted) = next(iter(prepared.items()))
+        if replaced or len(inserted) != 1 or not path.startswith("sqlglot/"):
+            return selected
+        anchor = next(iter(inserted)) + 1
+        if anchor in index.import_lines.get(path, set()):
+            return selected
+        touched = self.lines.get(path, {}).get(anchor, 0)
+        if touched & self.setup_bit:
+            return selected
+        # Retain warm line hits, explicit readers, caches and unmeasured tests first.
+        # All remaining prerequisites are paid only if an executor test can be spared.
+        preserved = index.tests_from_bits(index.reads.get(path, 0) | index.execution.child_reads.get(path, 0)
+                                          | index.incomplete | index.unknown | index.execution.untraced
+                                          | index.files.get(path, {}).get(anchor, 0)
+                                          | index.cache_consumers.floor(path, replaced, inserted))
+        reached = {group for i, (group, _, _, _) in enumerate(self.cases) if touched & (15 << (4 * i))}
+        safe = {number for group, number in self.numbers.items()
+                if number in selected and number not in preserved and group not in reached}
+        if not safe:
+            return selected
+        from cold_coverage import digest as source_digest
+        file_record = recorded_entries(index).get(path)
+        if not file_record or source_digest(source.text) != file_record[0]:
+            return selected
+        try:
+            edits = _parse_diff(text)
+            if len(edits) != 1 or edits[0].path != path:
+                return selected
+            scope = inserted_branch_entry(source, tree, path, anchor,
+                                          len(changed.splitlines()) - len(source.text.splitlines()), index.execution)
+            if scope is None:
+                return selected
+        except (OSError, SyntaxError, UnicodeError, ValueError, RecursionError):
+            return selected
+        # A bit is present only when the entire original basic block was absent
+        # from both recorded native cold runs, including setup and spawned workers.
+        observed_safe = file_record[1].get(f"{scope}|{anchor}", 0)
+        return selected.difference(self.numbers[group] for i, group in enumerate(GROUPS)
+                                   if observed_safe & (1 << i) and self.numbers.get(group) in safe)
 
     def select(self, text, index, selected, costs, schedule):
         targets = {g: n for g, n in self.numbers.items() if n in selected}

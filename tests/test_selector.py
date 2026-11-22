@@ -8,7 +8,7 @@ from pathlib import Path
 import unittest
 
 from ast_syntax import same_syntax
-from execution import ExecutionIndex, ScopeChange, changes, only_local_conditions, scalar_replacements
+from execution import ExecutionIndex, ScopeChange, changes, compiled_candidate, only_local_conditions, scalar_replacements
 from impact import ImpactIndex, Source, _apply, _parse_diff, _separate_declarations, _statements, choose_tests
 from selector import fill_slack, schedule
 
@@ -29,6 +29,65 @@ class SchedulerTests(unittest.TestCase):
                           ast.dump(ast.parse(old.replace('return 2', 'return 7')))])
         self.assertEqual(ast.dump(source.tree), source.syntax)
         self.assertEqual(ast.dump(tree), ast.dump(ast.parse(updated)))
+        original_code = compiled_candidate(tree, path)
+        self.assertIs(original_code, compiled_candidate(tree, path))
+        for part in parts:
+            self.assertIsNot(original_code, compiled_candidate(part[2], path))
+            self.assertEqual(compiled_candidate(part[2], path), compile(part[2], path, "exec", dont_inherit=True))
+
+    def test_inserted_statements_require_an_existing_conditional_line_entry(self):
+        from probe import inserted_branch_entry
+
+        path = "sqlglot/example.py"
+        old = "def value(x):\n    if x:\n        return pow(x, 2)\n    return 0\n"
+        source = Source(old, path)
+        addition = "        if x is None:\n            raise ValueError()\n"
+        updated = old.replace("        return pow", addition + "        return pow")
+        tree = ast.parse(updated)
+        before = ast.dump(tree)
+        self.assertEqual(inserted_branch_entry(source, tree, path, 3, 2, ExecutionIndex), "1:value")
+        self.assertEqual(ast.dump(tree), before)
+        changed_elsewhere = ast.parse(updated.replace("return 0", "return 1"))
+        self.assertIsNone(inserted_branch_entry(source, changed_elsewhere, path, 3, 2, ExecutionIndex))
+        new_local = ast.parse(old.replace("        return pow", "        surprise = 1\n        return pow"))
+        self.assertIsNone(inserted_branch_entry(source, new_local, path, 3, 1, ExecutionIndex))
+        self.assertIsNone(inserted_branch_entry(source, tree, path, 4, 2, ExecutionIndex))
+
+    def test_executor_entry_requires_cold_and_warm_misses_and_a_single_changed_file(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch as mock
+        from cold_coverage import digest
+        from probe import GROUPS, QueryProbe
+
+        filename = "sqlglot/example.py"
+        old = "def value(x):\n    if x:\n        return abs(x)\n    return 0\n"
+        new = old.replace("        return abs", "        if x is None:\n            return 3\n        return abs")
+        delta = patch(filename, old, new)
+        text, replaced, inserted = _apply(old, _parse_diff(delta)[0].hunks)
+        prepared = {filename: (Source(old, filename), text, ast.parse(text), replaced, inserted)}
+        probe = QueryProbe.__new__(QueryProbe)
+        probe.numbers = {GROUPS[0]: 7}
+        probe.cases = [(GROUPS[0], 0, {}, {})]
+        probe.lines = {}
+        probe.setup_bit = 16
+        execution = SimpleNamespace(child_reads={}, untraced=0, baseline=ExecutionIndex.baseline)
+        index = SimpleNamespace(import_lines={}, reads={}, files={}, execution=execution, incomplete=0, unknown=0,
+                                cache_consumers=SimpleNamespace(floor=lambda *args: 0),
+                                tests_from_bits=lambda bits: {7} if bits else set())
+        selected = {7, 12}
+        model = {filename: [digest(old), {"1:value|3": 1}]}
+        with mock("probe.recorded_entries", return_value=model):
+            self.assertEqual(probe.exclude_unentered_branches(delta, index, selected, prepared), {12})
+            mixed = delta + patch("fixture.txt", "one\n", "two\n")
+            self.assertEqual(probe.exclude_unentered_branches(mixed, index, selected, prepared), selected)
+            probe.lines[filename] = {3: 1}
+            self.assertEqual(probe.exclude_unentered_branches(delta, index, selected, prepared), selected)
+            probe.lines.clear()
+            index.files[filename] = {3: 1}
+            self.assertEqual(probe.exclude_unentered_branches(delta, index, selected, prepared), selected)
+            index.files.clear()
+            model[filename][1].clear()
+            self.assertEqual(probe.exclude_unentered_branches(delta, index, selected, prepared), selected)
 
     def test_default_and_body_of_same_function_are_disjoint(self):
         path = 'sqlglot/example.py'
