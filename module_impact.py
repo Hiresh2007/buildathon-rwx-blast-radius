@@ -230,7 +230,10 @@ def boundary_selection(text, index, prepared, selected, price, protected):
             bits |= module_tests(index, path) | index.cache_consumers.floor(path, replaced, inserted)
     revised = selected & index.tests_from_bits(bits)
     revised |= protected
-    if revised == selected or price(selected) - price(revised) < 2000:
+    if revised == selected:
+        return selected
+    saved_ms = price(selected) - price(revised)
+    if saved_ms < 2000:
         return selected
     checks = {}
     try:
@@ -255,7 +258,8 @@ def boundary_selection(text, index, prepared, selected, price, protected):
             payload = {"files": {path: entry[1] for path, entry in prepared.items() if path not in index.test_files}, "classes": checks}
             done = subprocess.run([sys.executable, "-I", "-B", "-S", str(Path(__file__).with_name("symbols.py")),
                                    "--verify-declarations", str(index.root)], input=json.dumps(payload), text=True,
-                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=True)
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  timeout=min(18.0, saved_ms / 2000), check=True)
             if done.stdout.strip() != "verified":
                 return selected
     except (OSError, UnicodeError, ValueError, SyntaxError, RecursionError, subprocess.SubprocessError):
