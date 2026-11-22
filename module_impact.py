@@ -12,6 +12,7 @@ from ast_syntax import same_syntax
 from cold_coverage import digest, profile
 from impact import _apply, _parse_diff
 from symbols import _factory_form, _module, _signature
+from module_patterns import changed_pattern, private_users
 
 
 def declaration_key(node):
@@ -256,6 +257,10 @@ def declarations(path, old, new, import_lines, operands=None):
                         or not visit(a.body, b.body, a.name)
                         or (a.name in verify and (a is not before[-1] or b is not after[-1]))):
                     return False
+            elif not owner and operands is not None and (pattern := changed_pattern(old, new, a, b)):
+                field, expression = pattern
+                operands.add((owner, field, "module-pattern", expression))
+                verify.add(owner)
             elif dialect and owner:
                 local = set() if operands is not None else None
                 if not dispatch_change(a, b, local):
@@ -271,7 +276,7 @@ def declarations(path, old, new, import_lines, operands=None):
     if operands:
         roots = {}
         for owner, _, kind, name in operands:
-            if kind != "inherited-set":
+            if kind not in ("inherited-set", "module-pattern"):
                 roots.setdefault(owner, set()).add(name.split(".")[0])
         for tree in (old, new):
             for cls in tree.body:
@@ -447,6 +452,9 @@ def boundary_selection(text, index, prepared, selected, price, protected):
                 return selected
             local = set()
             names = declarations(path, source.tree, tree, index.import_lines.get(path, set()), local)
+            if any(kind == "module-pattern" and (len(paths) != 1 or not private_users(index.root, path, field))
+                   for _, field, kind, _ in local):
+                return selected
             if local:
                 operands[path] = sorted(local)
             if names is None:
@@ -455,10 +463,11 @@ def boundary_selection(text, index, prepared, selected, price, protected):
                 checks[path] = sorted(names)
         if checks:
             payload = {"files": {path: entry[1] for path, entry in prepared.items() if path not in index.test_files}, "classes": checks, "operands": operands}
+            cpu_budget = min(18.0, saved_ms / 2000)
             done = subprocess.run([sys.executable, "-I", "-B", "-S", str(Path(__file__).with_name("symbols.py")),
-                                   "--verify-declarations", str(index.root)], input=json.dumps(payload), text=True,
+                                   "--verify-declarations", str(index.root), str(cpu_budget)], input=json.dumps(payload), text=True,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                  timeout=min(18.0, saved_ms / 2000), check=True)
+                                  timeout=min(25.0, 2 * cpu_budget), check=True)
             if done.stdout.strip() != "verified":
                 return selected
     except (OSError, UnicodeError, ValueError, SyntaxError, RecursionError, subprocess.SubprocessError):

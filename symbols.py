@@ -12,7 +12,9 @@ import inspect
 import json
 import os
 from pathlib import Path
+import math
 import re
+import resource
 import sqlite3
 import subprocess
 import sys
@@ -20,6 +22,7 @@ import textwrap
 import tempfile
 import sysconfig
 import time
+import warnings
 from types import CodeType, FunctionType, ModuleType
 
 
@@ -441,6 +444,20 @@ def build_baseline(root, map_path, output):
     )
 
 
+def child_cpu_seconds():
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
+
+
+def limit_worker_cpu(seconds):
+    """Keep the existing process limits when they are more restrictive."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
+    limit = max(1, math.ceil(seconds))
+    hard = limit + 1 if hard == resource.RLIM_INFINITY else min(hard, limit + 1)
+    soft = min(hard, limit if soft == resource.RLIM_INFINITY else min(soft, limit))
+    resource.setrlimit(resource.RLIMIT_CPU, (soft, hard))
+
+
 class SymbolIndex:
     """Masks are indexed by the supplied IDs, matching ImpactIndex.numbers."""
 
@@ -460,6 +477,7 @@ class SymbolIndex:
         self.copies = {k: pool[v] for k, v in data.get("copies", {}).items()}
         self.root = Path(source_root or os.environ.get("SQLGLOT_ROOT", "/opt/sqlglot")).resolve()
         self.worker_seconds = 40.0
+        self.worker_wall = 65.0
         self.baseline = {}
         self.approved_factories = set()
         self.snapshot_path = (
@@ -521,9 +539,11 @@ class SymbolIndex:
         payload = json.dumps(
             {"path": path, "source": source, "fields": sorted(fields), "factories": sorted(factories)}
         ).encode()
-        if self.worker_seconds < 0.1:
+        if min(self.worker_seconds, self.worker_wall) < 0.1:
             return None
+        budget = min(10.0, self.worker_seconds)
         started = time.monotonic()
+        cpu_started = child_cpu_seconds()
         try:
             p = subprocess.run(
                 [
@@ -534,18 +554,20 @@ class SymbolIndex:
                     str(Path(__file__).resolve()),
                     "--probe",
                     str(self.root),
+                    str(budget),
                 ],
                 input=payload,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                timeout=min(10, self.worker_seconds),
+                timeout=min(20.0, self.worker_wall),
                 check=True,
             )
             return json.loads(p.stdout)
         except (OSError, subprocess.SubprocessError, ValueError):
             return None
         finally:
-            self.worker_seconds -= time.monotonic() - started
+            self.worker_seconds -= child_cpu_seconds() - cpu_started
+            self.worker_wall -= time.monotonic() - started
 
     def select(self, path, old_tree, new_tree, old_source=None, new_source=None):
         if not path.startswith("sqlglot/") or new_source is None:
@@ -638,6 +660,17 @@ def passive_key(value):
 
 
 def verified_operand(module, owner, field, kind, path, changed_modules, local_factories=None):
+    if kind == "module-pattern":
+        item = vars(module).get(field)
+        if owner or vars(module).get("re") is not re or type(item) is not re.Pattern or item.pattern != path:
+            return False
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            try:
+                re.purge()
+                return re.compile(path).flags == item.flags
+            except (re.error, Warning, ValueError, OverflowError):
+                return False
     names = path.split(".")
     cls = vars(module)[owner]
     if kind == "inherited-set":
@@ -734,6 +767,8 @@ def verify_declarations(root):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] in ("--verify-declarations", "--probe"):
+        limit_worker_cpu(float(sys.argv.pop()))
     if len(sys.argv) == 3 and sys.argv[1] == "--verify-declarations":
         verify_declarations(Path(sys.argv[2]))
     elif len(sys.argv) == 3 and sys.argv[1] == "--probe":
