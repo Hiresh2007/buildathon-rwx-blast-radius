@@ -39,6 +39,11 @@ def _safe_value(value, existing):
         return True
     if isinstance(value, ast.Constant):
         return type(value.value) in (int, bool, str, float, type(None))
+    if isinstance(value, ast.Lambda):
+        defaults = (*value.args.defaults, *value.args.kw_defaults)
+        return (all(isinstance(item, ast.Constant) for item in defaults if item is not None)
+                and not any(isinstance(item, ast.Name) and item.id in {"__class__", "super"}
+                            for item in ast.walk(value)))
     if isinstance(value, ast.Name):
         return not value.id.startswith("__")
     if isinstance(value, ast.Attribute):
@@ -71,8 +76,23 @@ def _factory_form(node):
 
 
 def _changed_factories(a, b):
-    old = {n: _signature(n) for n in ast.walk(a) if isinstance(n, (ast.Call, ast.Lambda))}
-    new = {n: _signature(n) for n in ast.walk(b) if isinstance(n, (ast.Call, ast.Lambda))}
+    def evaluated_calls(root):
+        calls = {}
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            if isinstance(node, ast.Lambda):
+                # Creating a callback evaluates its defaults. Its body first runs
+                # when a consumer retrieves and invokes this table entry.
+                pending.extend(item for item in (*node.args.defaults, *node.args.kw_defaults)
+                               if item is not None)
+                continue
+            if isinstance(node, ast.Call):
+                calls[node] = _signature(node)
+            pending.extend(ast.iter_child_nodes(node))
+        return calls
+
+    old, new = evaluated_calls(a), evaluated_calls(b)
     if Counter(old.values()) == Counter(new.values()):
         return [], []
     # Keep all unchanged executable expressions intact. Only same-callee calls

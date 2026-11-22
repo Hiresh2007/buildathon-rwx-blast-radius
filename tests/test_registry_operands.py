@@ -4,7 +4,7 @@ from types import ModuleType
 import unittest
 
 from module_impact import dispatch_change
-from symbols import verified_operand
+from symbols import declarations, verified_operand
 
 
 class Token(enum.IntEnum):
@@ -64,6 +64,19 @@ class RegistryOperandTests(unittest.TestCase):
         del self.module.Registry.Token
         self.module.types.Generator = type("Generator", (), {"TOKENS": [Token.START]})
         self.assertFalse(self.validate(checks))
+
+    def test_deferred_callback_lookups_allow_shape_changes_only_after_registration(self):
+        path = "sqlglot/example.py"
+        known = {"sqlglot.example:TABLE"}
+        old = ast.parse("TABLE = {'LEFT': lambda x: x}")
+        for rhs in ("lambda x: transform(x)", "lambda x, step=1: x + step"):
+            new = ast.parse("TABLE = {'LEFT': lambda x: x, 'RIGHT': " + rhs + "}")
+            self.assertEqual(declarations(path, old, new, known), list(known))
+            self.assertEqual(declarations(path, new, old, known), list(known))
+        for rhs in ("lambda x=configure(): x", "factory(lambda x: x)", "lambda x=option.setting: x",
+                    "lambda x: super().transform(x)"):
+            new = ast.parse("TABLE = {'LEFT': lambda x: x, 'RIGHT': " + rhs + "}")
+            self.assertIsNone(declarations(path, old, new, known))
 
     def test_registry_calls_keep_their_existing_shape_and_order(self):
         old = "TABLE = {**Base.T, 'A': rename('A'), **Other.T}"

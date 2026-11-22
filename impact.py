@@ -469,7 +469,22 @@ def _python_change(change, index, prepared, *, passive_exempt=None):
     line_bits = index.all_bits
     if _balanced_replacements(change.hunks):
         line_bits = _line_change(change.path, source, replaced, inserted, index)
-    execution_bits = index.execution.select(change.path, source.text, tree)
+    try:
+        execution_bits = index.execution.select(change.path, source.text, tree)
+    except ScopeChange:
+        # A callback inside a table is a code object, so changing the table may
+        # change lexical layout. Only the independent declaration proof can
+        # narrow that case; a line-level estimate would lose metadata changes.
+        if (passive_exempt is not None or not any(
+                source.runtime_scope(line) is None
+                and isinstance(source.statement(line), (ast.Assign, ast.AnnAssign))
+                for line in replaced | inserted)):
+            raise
+        symbols = index.symbols.select(change.path, source.tree, tree, source.text, changed)
+        if symbols is None:
+            raise
+        return (symbols | reads | index.execution.child_reads.get(change.path, 0) | index.unknown
+                | (cold & (index.incomplete | index.execution.untraced)))
     if execution_bits is not None:
         # Main-process line coverage cannot rule out a call observed only in a child.
         line_bits = (line_bits & execution_bits) | (execution_bits & index.execution.child_complete)
