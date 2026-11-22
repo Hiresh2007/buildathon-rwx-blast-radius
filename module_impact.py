@@ -8,12 +8,12 @@ from pathlib import Path
 import subprocess
 import sys
 
-from ast_syntax import same_syntax
+from ast_syntax import SyntaxIndex, same_syntax
 from cold_coverage import digest, profile
 from deferred_calls import observed_calls
 from forwarding_decorators import deferred_decorators
 from impact import _apply, _parse_diff
-from symbols import _factory_form, _module, _signature
+from symbols import _factory_form, _module
 
 
 def declaration_key(node):
@@ -66,10 +66,12 @@ def dispatch_change(old, new, checks=None):
     if not isinstance(old.value, ast.Dict) or not isinstance(new.value, ast.Dict):
         return set_expression(old.value, new.value, checks)
 
+    signature = SyntaxIndex().key
+
     def entries(mapping):
         grouped = []
         for key, item in zip(mapping.keys, mapping.values):
-            grouped.append(((_signature(key), _signature(item)), key, item))
+            grouped.append(((signature(key), signature(item)), key, item))
         return grouped
 
     before, after = entries(old.value), entries(new.value)

@@ -42,3 +42,29 @@ def same_module_syntax(original, candidate, changed_line):
     if left is not original and not same_syntax(left, right):
         return False
     return same_syntax(original, candidate)
+
+
+class SyntaxIndex:
+    """Intern source syntax within one comparison, ignoring source locations."""
+
+    def __init__(self):
+        self.nodes = {}
+        self.forms = {}
+
+    def key(self, value):
+        kind = type(value)
+        if isinstance(value, ast.AST):
+            known = self.nodes.get(value)
+            if known is not None:
+                return known
+            form = (kind, *(self.key(getattr(value, field)) for field in value._fields))
+            index = self.forms.setdefault(form, len(self.forms))
+            self.nodes[value] = index
+            return index
+        if kind in (list, tuple):
+            form = (kind, *(self.key(item) for item in value))
+        elif kind in (float, complex):
+            form = (kind, repr(value))
+        else:
+            form = (kind, value)
+        return self.forms.setdefault(form, len(self.forms))

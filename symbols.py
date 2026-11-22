@@ -26,28 +26,20 @@ def _module(path):
     return path[:-3].replace("/", ".").removesuffix(".__init__")
 
 
-def _signature(value):
-    if isinstance(value, ast.AST):
-        return ast.dump(value)
-    if isinstance(value, list):
-        return tuple(_signature(x) for x in value)
-    return value
-
-
-def _safe_value(value, existing):
-    if _signature(value) in existing:
+def _safe_value(value, existing, signature):
+    if signature(value) in existing:
         return True
     if isinstance(value, ast.Constant):
         return type(value.value) in (int, bool, str, float, type(None))
     if isinstance(value, ast.Name):
         return not value.id.startswith("__")
     if isinstance(value, ast.Attribute):
-        return not value.attr.startswith("__") and _safe_value(value.value, existing)
+        return not value.attr.startswith("__") and _safe_value(value.value, existing, signature)
     if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
-        return all(_safe_value(item, existing) for item in value.elts)
+        return all(_safe_value(item, existing, signature) for item in value.elts)
     if isinstance(value, ast.Dict):
-        return all(k is None or _safe_value(k, existing) for k in value.keys) and all(
-            _safe_value(v, existing) for v in value.values
+        return all(k is None or _safe_value(k, existing, signature) for k in value.keys) and all(
+            _safe_value(v, existing, signature) for v in value.values
         )
     if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.Not, ast.UAdd, ast.USub)):
         return isinstance(value.operand, ast.Constant)
@@ -70,9 +62,9 @@ def _factory_form(node):
     return node.func.id, tuple((key, type(value.value).__name__) for key, value in args)
 
 
-def _changed_factories(a, b):
-    old = {n: _signature(n) for n in ast.walk(a) if isinstance(n, (ast.Call, ast.Lambda))}
-    new = {n: _signature(n) for n in ast.walk(b) if isinstance(n, (ast.Call, ast.Lambda))}
+def _changed_factories(a, b, signature):
+    old = {n: signature(n) for n in ast.walk(a) if isinstance(n, (ast.Call, ast.Lambda))}
+    new = {n: signature(n) for n in ast.walk(b) if isinstance(n, (ast.Call, ast.Lambda))}
     if Counter(old.values()) == Counter(new.values()):
         return [], []
     # Keep all unchanged executable expressions intact. Only same-callee calls
@@ -161,7 +153,7 @@ def _approved_factory(fn):
 
 
 def declarations(path, old_tree, new_tree, known, factories=None):
-    from ast_syntax import same_syntax
+    from ast_syntax import SyntaxIndex, same_syntax
 
     changed = []
 
@@ -197,9 +189,10 @@ def declarations(path, old_tree, new_tree, known, factories=None):
                 return False
             # A new callable/executable initializer is never run by the import probe.
             # Existing callable entries in a dispatch table can stay in place.
-            ao = {_signature(n) for n in ast.walk(a.value)}
-            bo = {_signature(n) for n in ast.walk(b.value)}
-            different = _changed_factories(a.value, b.value)
+            signature = SyntaxIndex().key
+            ao = {signature(n) for n in ast.walk(a.value)}
+            bo = {signature(n) for n in ast.walk(b.value)}
+            different = _changed_factories(a.value, b.value, signature)
             if different is None:
                 return False
             old_calls, new_calls = different
@@ -212,9 +205,9 @@ def declarations(path, old_tree, new_tree, known, factories=None):
                     return False
                 for n in old_calls:
                     factories.add((symbol, n.func.id))
-                ao.update(_signature(n) for n in new_calls)
-                bo.update(_signature(n) for n in old_calls)
-            if not _safe_value(b.value, ao) or not _safe_value(a.value, bo):
+                ao.update(signature(n) for n in new_calls)
+                bo.update(signature(n) for n in old_calls)
+            if not _safe_value(b.value, ao, signature) or not _safe_value(a.value, bo, signature):
                 return False
             changed.append(symbol)
         return True

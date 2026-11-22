@@ -3,6 +3,8 @@ import enum
 from types import ModuleType
 import unittest
 
+from ast_syntax import SyntaxIndex
+
 from module_impact import dispatch_change
 from symbols import verified_operand
 
@@ -39,6 +41,16 @@ class RegistryOperandTests(unittest.TestCase):
     def validate(self, checks):
         return all(verified_operand(self.module, "Registry", "TABLE", kind, name, {})
                    for kind, name in checks)
+
+    def test_structural_keys_preserve_literal_types_and_expression_shape(self):
+        index = SyntaxIndex()
+        trees = [ast.parse(text, mode="eval") for text in
+                 ("True", "1", "1.0", "0.0", "-0.0", "0j", "b'x'", "'x'", "x", "[x]", "(x,)",
+                  "lambda: x", "lambda: y", "f(x)", "f(y)", "{'x': f(x)}")]
+        self.assertEqual(len({index.key(tree) for tree in trees}), len(trees))
+        for tree in trees:
+            self.assertEqual(index.key(tree), index.key(ast.parse(ast.unparse(tree), mode="eval")))
+        self.assertNotEqual(index.key(ast.Constant(value=0.0)), index.key(ast.Constant(value=-0.0)))
 
     def test_class_to_lambda_registrations_and_classmethod_references(self):
         old = "TABLE = {**Base.TABLE, 'NOW': lambda args: args}"
