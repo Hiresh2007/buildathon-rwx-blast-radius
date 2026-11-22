@@ -1,10 +1,15 @@
 import ast
 import enum
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 from types import ModuleType
 import unittest
 
 from module_impact import dispatch_change
-from symbols import declarations, verified_operand
+from symbols import _Fingerprints, declarations, verified_operand
 
 
 class Token(enum.IntEnum):
@@ -77,6 +82,24 @@ class RegistryOperandTests(unittest.TestCase):
                     "lambda x: super().transform(x)"):
             new = ast.parse("TABLE = {'LEFT': lambda x: x, 'RIGHT': " + rhs + "}")
             self.assertIsNone(declarations(path, old, new, known))
+
+    def test_joint_snapshot_imports_both_revised_modules(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            package = root / "sqlglot"
+            package.mkdir()
+            (package / "__init__.py").write_text("")
+            (package / "first.py").write_text("VALUE = 1\n")
+            (package / "second.py").write_text("from .first import VALUE\nTOTAL = VALUE * 2\n")
+            fields = ["sqlglot.second:TOTAL"]
+            sources = {"sqlglot/first.py": "VALUE = 2\n",
+                       "sqlglot/second.py": "from .first import VALUE\nTOTAL = VALUE * 3\n"}
+            script = Path(__file__).resolve().parents[1] / "symbols.py"
+            for request, total in (({"sources": sources}, 6), ({"path": "sqlglot/first.py", "source": "VALUE = 4"}, 8)):
+                proc = subprocess.run([sys.executable, "-I", "-B", "-S", str(script), "--probe", name],
+                                      input=json.dumps({**request, "fields": fields}), text=True,
+                                      capture_output=True, check=True)
+                self.assertEqual(json.loads(proc.stdout)[fields[0]], _Fingerprints().field(total))
 
     def test_registry_calls_keep_their_existing_shape_and_order(self):
         old = "TABLE = {**Base.T, 'A': rename('A'), **Other.T}"

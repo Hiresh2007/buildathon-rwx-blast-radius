@@ -324,15 +324,16 @@ class _Fingerprints:
         return ["value", self.value(obj)]
 
 
-def _import_all(root, target=None, replacement=None):
+def _import_all(root, sources=None):
     original = importlib.machinery.SourceFileLoader.get_code
+    replacements = {_module(path): source for path, source in (sources or {}).items()}
 
     def get_code(loader, fullname):
-        if replacement is not None and fullname == _module(target):
-            return compile(replacement, loader.path, "exec", dont_inherit=True)
+        if fullname in replacements:
+            return compile(replacements[fullname], loader.path, "exec", dont_inherit=True)
         return original(loader, fullname)
 
-    if replacement is not None:
+    if replacements:
         importlib.machinery.SourceFileLoader.get_code = get_code
     sys.path.insert(0, str(root))
     for path in sorted((root / "sqlglot").rglob("*.py")):
@@ -372,7 +373,13 @@ def _snapshot(fields):
 
 def _probe_main(root):
     request = json.load(sys.stdin)
-    _import_all(root, request["path"], request.get("source"))
+    if "sources" in request:
+        sources = request["sources"]
+    elif request.get("source") is not None:
+        sources = {request["path"]: request["source"]}
+    else:
+        sources = {}
+    _import_all(root, sources)
     if not all(_factory_bound_to(field, name) for field, name in request.get("factories", ())):
         raise ValueError("unverified transform factory")
     json.dump(_snapshot(request["fields"]), sys.stdout, separators=(",", ":"))
@@ -536,8 +543,11 @@ class SymbolIndex:
                 self.snapshot_db = None
 
     def probe(self, path, source, fields, factories=()):
+        return self.probe_sources({path: source} if source is not None else {}, fields, factories)
+
+    def probe_sources(self, sources, fields, factories=()):
         payload = json.dumps(
-            {"path": path, "source": source, "fields": sorted(fields), "factories": sorted(factories)}
+            {"sources": sources, "fields": sorted(fields), "factories": sorted(factories)}
         ).encode()
         if self.worker_seconds < 0.1:
             return None
@@ -572,6 +582,10 @@ class SymbolIndex:
         roots = declarations(path, old_tree, new_tree, self.declared, factories)
         if not roots or len(roots) != 1:
             return None
+        return self.select_fields(roots, {path: new_source}, factories)
+
+    def select_fields(self, roots, sources, factories):
+        """Snapshot all affected fields in the same fully imported revision."""
         closure = set(roots)
         pending = list(roots)
         while pending:
@@ -583,16 +597,17 @@ class SymbolIndex:
         missing = closure - self.baseline.keys()
         unverified = factories - self.approved_factories
         if missing or unverified:
-            initial = self.probe(path, None, missing, unverified)
+            initial = self.probe_sources({}, missing, unverified)
             if initial is None:
                 return None
             self.baseline.update(initial)
             self.approved_factories.update(unverified)
-        final = self.probe(path, new_source, closure)
+        final = self.probe_sources(sources, closure)
         if final is None:
             return None
         bits = self.incomplete
         accounted = False
+        seen_directly = set()
         for symbol in closure:
             before, after = self.baseline.get(symbol), final.get(symbol)
             if before == ["enum_member"] or after == ["enum_member"]:
@@ -628,16 +643,19 @@ class SymbolIndex:
                 if mod not in self.modules:
                     return None
                 bits |= self.modules[mod]
-            accounted |= bool(raw or keys or initialized or init_keys or copies)
+            if raw or keys or initialized or init_keys or copies:
+                accounted = True
+                seen_directly.add(symbol)
             if before is None or after is None:
                 # Dynamic class factories can produce classes without a stable module binding.
                 module, field = symbol.split(":", 1)
                 owner = field.rpartition(".")[0]
                 bits |= self.classes.get(f"{module}:{owner}", 0) or self.modules.get(module, 0)
-        if not accounted:
+        unaccounted = set(roots) - seen_directly if len(roots) > 1 else (set() if accounted else roots)
+        if unaccounted:
             # Imports succeeded but a published configuration value might only be used
             # through copied/native data. Keep tests using its owner or module.
-            for symbol in roots:
+            for symbol in unaccounted:
                 mod, field = symbol.split(":", 1)
                 owner = field.rpartition(".")[0]
                 extra = self.classes.get(f"{mod}:{owner}", 0) or self.modules.get(mod, 0)

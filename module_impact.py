@@ -12,7 +12,7 @@ from ast_syntax import same_syntax
 from cold_coverage import digest, profile
 from deferred_calls import observed_calls
 from impact import _apply, _parse_diff
-from symbols import _factory_form, _module, _signature
+from symbols import _factory_form, _module, _signature, declarations as declared_fields
 
 
 def declaration_key(node):
@@ -302,6 +302,28 @@ def module_tests(index, path):
     return bits
 
 
+def joint_configuration(index, prepared):
+    if len(prepared) < 2 or any(not path.startswith("sqlglot/") for path in prepared):
+        return None
+    roots, sources = [], {}
+    floor = index.unknown | index.symbols.incomplete
+    for path, (source, changed, tree, replaced, inserted) in prepared.items():
+        if not any(source.runtime_scope(line) is None and isinstance(source.statement(line), (ast.Assign, ast.AnnAssign))
+                   for line in replaced | inserted):
+            return None
+        factories = set()
+        fields = declared_fields(path, source.tree, tree, index.symbols.declared, factories)
+        if not fields or factories:
+            return None
+        roots.extend(fields)
+        sources[path] = changed
+        floor |= index.reads.get(path, 0) | index.execution.child_reads.get(path, 0)
+        floor |= index.cache_consumers.floor(path, replaced, inserted)
+        floor |= (index.incomplete | index.execution.untraced) & index.isolated.get(path, index.all_bits)
+    bits = index.symbols.select_fields(roots, sources, set())
+    return None if bits is None else index.tests_from_bits(bits | floor)
+
+
 def boundary_selection(text, index, prepared, selected, price, protected):
     if (not prepared or not any(path.startswith("sqlglot/") for path in prepared)
             or any(not path.endswith(".py") or (not path.startswith("sqlglot/") and path not in index.test_files)
@@ -321,6 +343,12 @@ def boundary_selection(text, index, prepared, selected, price, protected):
             return selected
     except (OSError, UnicodeError, ValueError):
         return selected
+    if not fixtures:
+        configuration = joint_configuration(index, prepared)
+        if configuration is not None:
+            result = (selected & configuration) | protected
+            if price(selected) - price(result) >= 2000:
+                return result
     bits = 0
     for change in fixtures:
         path = change.path
