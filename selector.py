@@ -5,6 +5,7 @@ import gzip
 import json
 import math
 import time
+from functools import lru_cache
 from pathlib import Path
 
 from impact import ImpactIndex, choose_tests
@@ -54,10 +55,13 @@ def fill_slack(workers, related, milliseconds):
             included.add(number)
 
 
-def schedule_cost(numbers, milliseconds):
-    workers = schedule(numbers, milliseconds)
+def worker_cost(workers, milliseconds):
     maximum = max((sum(milliseconds[n] for n in worker) for worker in workers), default=0)
     return 2000 * len(workers) + maximum
+
+
+def schedule_cost(numbers, milliseconds):
+    return worker_cost(schedule(numbers, milliseconds), milliseconds)
 
 
 def main():
@@ -70,6 +74,17 @@ def main():
         index = ImpactIndex(json.load(stream), tests)
     probe = QueryProbe(tests)
     milliseconds = {t["number"]: math.floor(t["seconds"] * 1000 + 0.5) for t in tests}
+    @lru_cache(maxsize=64)
+    def plan(numbers):
+        workers = schedule(numbers, milliseconds)
+        return workers, worker_cost(workers, milliseconds)
+
+    def planned_workers(numbers, _costs):
+        return plan(frozenset(numbers))[0]
+
+    def price(numbers):
+        return plan(frozenset(numbers))[1]
+
     free_tests = {number for number, duration in milliseconds.items() if duration == 0}
     patches = {}
     selections = {}
@@ -94,20 +109,25 @@ def main():
             spared = unaffected(patch, index, prepared) - protected[path.stem]
             if spared:
                 if full_cost is None:
-                    full_cost = schedule_cost(selected, milliseconds)
+                    full_cost = price(selected)
                 revised = selected - spared
-                if full_cost - schedule_cost(revised, milliseconds) >= 1000:
+                if full_cost - price(revised) >= 1000:
                     selected = revised
                     cold_only.add(path.stem)
+            from module_impact import boundary_selection
+            narrowed = boundary_selection(patch, index, prepared, selected, price, protected[path.stem])
+            if narrowed != selected:
+                selected = narrowed
+                cold_only.add(path.stem)
         elif not protected[path.stem]:
-            selected = probe.select(patch, index, selected, milliseconds, schedule)
+            selected = probe.select(patch, index, selected, milliseconds, planned_workers)
         selections[path.stem] = selected
     if time.monotonic() - started < 140:
         candidates = {key: selections[key] for key in patches if selections[key] != index.all and not protected[key] and key not in cold_only}
-        selections.update(refine(patches, candidates, index, tests, schedule))
+        selections.update(refine(patches, candidates, index, tests, planned_workers))
     for key, selected in selections.items():
         selected = selected | protected.get(key, set())
-        workers = schedule(selected, milliseconds)
+        workers = [worker.copy() for worker in planned_workers(selected, milliseconds)]
         if workers and selected != index.all:
             if len(workers) == 1:
                 fill_slack(workers, [free_tests], milliseconds)

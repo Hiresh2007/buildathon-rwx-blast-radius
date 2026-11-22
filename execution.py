@@ -9,6 +9,19 @@ import struct
 import sys
 import types
 from functools import lru_cache
+from weakref import WeakKeyDictionary
+
+
+_compiled_candidates = WeakKeyDictionary()
+
+
+def compiled_candidate(tree, path):
+    """Reuse compilation of the same prepared AST throughout a patch analysis."""
+    code = _compiled_candidates.get(tree)
+    if code is None or code.co_filename != path:
+        code = compile(tree, path, "exec", dont_inherit=True)
+        _compiled_candidates[tree] = code
+    return code
 
 
 def scope_name(code):
@@ -294,7 +307,7 @@ class ExecutionIndex:
         if not self.complete or path not in self.files or not path.startswith("sqlglot/"):
             return None
         try:
-            changed = changes(self.baseline(source, path), compile(tree, path, "exec", dont_inherit=True))
+            changed = changes(self.baseline(source, path), compiled_candidate(tree, path))
         except (ValueError, RecursionError):
             return None
         selected = self.untraced & ~self.child_complete

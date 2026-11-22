@@ -1,0 +1,263 @@
+"""Conservative file-level fallback for changes confined to deferred declarations."""
+import ast
+from functools import lru_cache
+import gzip
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+from ast_syntax import same_syntax
+from cold_coverage import digest, profile
+from impact import _parse_diff
+from symbols import _module, _signature
+
+
+def declaration_key(node):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return node.name
+    return None
+
+
+def dispatch_change(old, new):
+    if not isinstance(old, ast.Assign) or not isinstance(new, ast.Assign):
+        return False
+    if (not same_syntax(old.targets, new.targets) or len(old.targets) != 1
+            or not isinstance(old.targets[0], ast.Name) or not old.targets[0].id.isupper()):
+        return False
+    if not isinstance(old.value, ast.Dict) or not isinstance(new.value, ast.Dict):
+        return False
+    # Every preexisting expression with possible effects must remain in its original
+    # relative order. Only string keys bound to unevaluated lambdas may change.
+    def split(value):
+        fixed = []
+        for key, item in zip(value.keys, value.values):
+            if (not isinstance(key, ast.Constant) or type(key.value) is not str
+                    or not isinstance(item, ast.Lambda) or item.args.defaults or any(item.args.kw_defaults)):
+                fixed.append((_signature(key), _signature(item)))
+        return fixed
+    return split(old.value) == split(new.value)
+
+
+def deferred_suffix(body, names, postponed):
+    """A new class binding must be followed only by ordinary deferred methods."""
+    after_change = False
+    for node in body:
+        if declaration_key(node) in names:
+            after_change = True
+        if after_change and (not declaration_key(node) or not simple_function(node, postponed)):
+            return False
+    return True
+
+
+def can_yield(node):
+    pending = list(node.body)
+    while pending:
+        current = pending.pop()
+        if isinstance(current, (ast.Yield, ast.YieldFrom)):
+            return True
+        if not isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            pending.extend(ast.iter_child_nodes(current))
+    return False
+
+
+def plain_decorators(node):
+    return all(isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod", "property")
+               for d in node.decorator_list)
+
+
+def simple_function(node, postponed):
+    if node.name.startswith("__") or node.type_params:
+        return False
+    if any(not isinstance(d, ast.Name) or d.id not in ("staticmethod", "classmethod")
+           for d in node.decorator_list):
+        return False
+    if any(not isinstance(value, ast.Constant) for value in (*node.args.defaults, *node.args.kw_defaults) if value is not None):
+        return False
+    args = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs, node.args.vararg, node.args.kwarg]
+    return postponed or (node.returns is None and all(arg is None or arg.annotation is None for arg in args))
+
+
+def declarations(path, old, new, import_lines):
+    dialect = path.startswith(("sqlglot/parsers/", "sqlglot/generators/"))
+    postponed = any(isinstance(n, ast.ImportFrom) and n.module == "__future__"
+                    and any(alias.name == "annotations" for alias in n.names) for n in old.body)
+    verify = set()
+    def visit(before, after, owner=""):
+        left = {n.name: n for n in before if declaration_key(n)}
+        right = {n.name: n for n in after if declaration_key(n)}
+        if (sum(bool(declaration_key(n)) for n in before) != len(left)
+                or sum(bool(declaration_key(n)) for n in after) != len(right)):
+            return False
+        common = left.keys() & right.keys()
+        changed_names = left.keys() ^ right.keys()
+        if changed_names and (not owner or not dialect
+                              or not deferred_suffix(before, changed_names, postponed)
+                              or not deferred_suffix(after, changed_names, postponed)):
+            return False
+        def ordering(body):
+            return [declaration_key(n) if declaration_key(n) else None for n in body
+                    if not declaration_key(n) or declaration_key(n) in common]
+        if ordering(before) != ordering(after):
+            return False
+        for name in left.keys() | right.keys():
+            a, b = left.get(name), right.get(name)
+            if a is not None and b is not None and same_syntax(a, b):
+                continue
+            if a is not None and any(a.body[0].lineno <= line <= a.end_lineno for line in import_lines):
+                return False
+            if a is not None and b is not None:
+                if (type(a) is not type(b) or not plain_decorators(a) or can_yield(a) != can_yield(b)
+                        or not all(same_syntax(getattr(a, field), getattr(b, field))
+                        for field in a._fields if field != "body") or ast.get_docstring(a, clean=False) != ast.get_docstring(b, clean=False)):
+                    return False
+                continue
+            node = a if a is not None else b
+            if not simple_function(node, postponed):
+                return False
+            verify.add(owner)
+        a_rest = [n for n in before if not declaration_key(n)]
+        b_rest = [n for n in after if not declaration_key(n)]
+        if len(a_rest) != len(b_rest):
+            return False
+        for a, b in zip(a_rest, b_rest):
+            if same_syntax(a, b):
+                continue
+            if isinstance(a, ast.ClassDef) and isinstance(b, ast.ClassDef) and not owner:
+                if (not all(same_syntax(getattr(a, field), getattr(b, field)) for field in a._fields if field != "body")
+                        or not visit(a.body, b.body, a.name)
+                        or (a.name in verify and (a is not before[-1] or b is not after[-1]))):
+                    return False
+            elif dialect and owner and dispatch_change(a, b):
+                verify.add(owner)
+            else:
+                return False
+        return True
+    return verify if visit(old.body, new.body) else None
+
+
+@lru_cache(maxsize=1)
+def test_sources():
+    try:
+        with gzip.open(Path(__file__).with_name("test-module-sources.json.gz"), "rt") as stream:
+            return json.load(stream)
+    except (OSError, EOFError, UnicodeError, ValueError):
+        return {}
+
+
+def only_added_tests(old, new, classes):
+    if len(old.body) != len(new.body):
+        return False
+    added = False
+    for a, b in zip(old.body, new.body):
+        if same_syntax(a, b):
+            continue
+        if (not isinstance(a, ast.ClassDef) or not isinstance(b, ast.ClassDef) or a.name not in classes
+                or a.decorator_list or a.keywords
+                or not all(same_syntax(getattr(a, k), getattr(b, k)) for k in a._fields if k != "body")):
+            return False
+        existing = {n.name for n in a.body if declaration_key(n)}
+        existing.update(n.id for n in ast.walk(a) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+        retained = []
+        for item in b.body:
+            if (isinstance(item, ast.FunctionDef) and item.name.startswith("test_") and item.name not in existing
+                    and not item.decorator_list and item.returns is None and not item.type_params
+                    and not item.args.defaults and not item.args.kwonlyargs and not item.args.posonlyargs
+                    and not item.args.vararg and not item.args.kwarg and len(item.args.args) == 1
+                    and item.args.args[0].annotation is None):
+                existing.add(item.name)
+                added = True
+                continue
+            retained.append(item)
+        if not same_syntax(a.body, retained):
+            return False
+    return added
+
+
+@lru_cache(maxsize=64)
+def module_tests(index, path):
+    data = profile()
+    if not data or not index.execution.complete or data["ids"] != index.execution_ids or path not in index.isolated:
+        return index.all_bits
+    bits = index.isolated[path] | index.unknown | index.incomplete | index.execution.untraced | index.symbols.incomplete
+    bits |= index.reads.get(path, 0) | index.execution.child_reads.get(path, 0)
+    for reached in index.files.get(path, {}).values():
+        bits |= reached
+    module = _module(path)
+    bits |= index.symbols.modules.get(module, 0)
+    for symbol, consumers in index.symbols.classes.items():
+        if symbol.startswith(module + ":"):
+            bits |= consumers
+    symbols = {name for name in index.symbols.declared if name.startswith(module + ":")}
+    pending = list(symbols)
+    while pending:
+        symbol = pending.pop()
+        bits |= index.symbols.raw.get(symbol, 0) | index.symbols.copies.get(symbol, 0)
+        for consumers in index.symbols.keys.get(symbol, {}).values():
+            bits |= consumers
+        imports = set(index.symbols.initialized.get(symbol, ()))
+        for readers in index.symbols.initialized_keys.get(symbol, {}).values():
+            imports.update(readers)
+        for imported in imports:
+            bits |= index.symbols.modules.get(imported, index.all_bits)
+        for dependent in index.symbols.derived.get(symbol, ()):
+            if dependent not in symbols:
+                symbols.add(dependent)
+                pending.append(dependent)
+    groups = int(data["reads"].get(path, "0"), 16)
+    for _, calls, uncertain, _ in data["files"].get(path, {}).values():
+        groups |= int(calls, 16) | int(uncertain, 16)
+    for n, members in enumerate(data["groups"]):
+        if groups & (1 << n):
+            bits |= int(members, 16)
+    return bits
+
+
+def boundary_selection(text, index, prepared, selected, price, protected):
+    if (not prepared or not any(path.startswith("sqlglot/") for path in prepared)
+            or any(not path.endswith(".py") or (not path.startswith("sqlglot/") and path not in index.test_files)
+                   for path in prepared)):
+        return selected
+    data = profile()
+    if not data or data["ids"] != index.execution_ids:
+        return selected
+    bits = 0
+    for path, (_, _, _, replaced, inserted) in prepared.items():
+        if path in index.test_files:
+            bits |= index.test_files[path] | index.isolated.get(path, index.all_bits) | index.unknown
+            bits |= index.reads.get(path, 0) | index.execution.child_reads.get(path, 0)
+        else:
+            bits |= module_tests(index, path) | index.cache_consumers.floor(path, replaced, inserted)
+    revised = selected & index.tests_from_bits(bits)
+    revised |= protected
+    if revised == selected or price(selected) - price(revised) < 2000:
+        return selected
+    checks = {}
+    try:
+        changes = _parse_diff(text)
+        if len(changes) != len(prepared) or {change.path for change in changes} != set(prepared):
+            return selected
+        for path, (source, changed, tree, _, _) in prepared.items():
+            if path in index.test_files:
+                classes = {name.split("::")[1] for name in index.execution_ids
+                           if name.startswith(path + "::") and name.count("::") >= 2}
+                if test_sources().get(path) != digest(source.text) or not only_added_tests(source.tree, tree, classes):
+                    return selected
+                continue
+            if data["hashes"].get(path) != digest(source.text):
+                return selected
+            names = declarations(path, source.tree, tree, index.import_lines.get(path, set()))
+            if names is None:
+                return selected
+            if names:
+                checks[path] = sorted(names)
+        if checks:
+            payload = {"files": {path: entry[1] for path, entry in prepared.items() if path not in index.test_files}, "classes": checks}
+            done = subprocess.run([sys.executable, "-I", "-B", "-S", str(Path(__file__).with_name("symbols.py")),
+                                   "--verify-declarations", str(index.root)], input=json.dumps(payload), text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=True)
+            if done.stdout.strip() != "verified":
+                return selected
+    except (OSError, UnicodeError, ValueError, SyntaxError, RecursionError, subprocess.SubprocessError):
+        return selected
+    return revised

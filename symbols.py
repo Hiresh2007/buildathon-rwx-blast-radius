@@ -625,8 +625,40 @@ class SymbolIndex:
         return bits
 
 
+def verify_declarations(root):
+    payload = json.load(sys.stdin)
+    files = {_module(path): (path, source) for path, source in payload["files"].items()}
+    loaded = set()
+    original = importlib.machinery.SourceFileLoader.get_code
+    def load(loader, name):
+        if name in files:
+            path, source = files[name]
+            if not Path(loader.path).samefile(root / path):
+                raise ImportError(name)
+            loaded.add(name)
+            return compile(source, loader.path, "exec", dont_inherit=True)
+        return original(loader, name)
+    importlib.machinery.SourceFileLoader.get_code = load
+    _import_all(root)
+    if loaded != files.keys():
+        return
+    for path, names in payload["classes"].items():
+        module = sys.modules[_module(path)]
+        if not Path(module.__file__).samefile(root / path):
+            return
+        for name in names:
+            if not name:
+                continue
+            cls = vars(module).get(name)
+            if type(cls) is not type or any("__init_subclass__" in base.__dict__ for base in cls.__mro__[1:-1]):
+                return
+    print("verified")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--probe":
+    if len(sys.argv) == 3 and sys.argv[1] == "--verify-declarations":
+        verify_declarations(Path(sys.argv[2]))
+    elif len(sys.argv) == 3 and sys.argv[1] == "--probe":
         _probe_main(Path(sys.argv[2]))
     elif len(sys.argv) == 5 and sys.argv[1] == "--build-baseline":
         build_baseline(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
