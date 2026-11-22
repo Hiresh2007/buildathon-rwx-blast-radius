@@ -36,6 +36,8 @@ def passive_operand(node, kind, checks):
     if isinstance(node, ast.Constant) and type(node.value) in (str, int, bool, type(None)):
         return True
     path = attribute_path(node)
+    if kind == "reference" and isinstance(node, ast.Name) and not node.id.startswith("__"):
+        path = node.id
     if path and checks is not None:
         checks.add((kind, path))
         return True
@@ -137,12 +139,79 @@ def simple_function(node, postponed):
     return postponed or (node.returns is None and all(arg is None or arg.annotation is None for arg in args))
 
 
+def assigned_field(node):
+    if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id.isupper()):
+        return node.targets[0].id
+    return None
+
+
+def eager_nodes(stmt):
+    pending = [stmt]
+    while pending:
+        item = pending.pop()
+        yield item
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            pending.extend(ast.iter_child_nodes(item.args))
+            if not isinstance(item, ast.Lambda):
+                pending.extend(item.decorator_list)
+                if item.returns:
+                    pending.append(item.returns)
+        else:
+            pending.extend(ast.iter_child_nodes(item))
+
+
+def inherited_sets(before, after, owner, operands):
+    original = Counter(name for n in before if (name := assigned_field(n)))
+    revised = Counter(name for n in after if (name := assigned_field(n)))
+    changed = original.keys() ^ revised.keys()
+    if not changed:
+        return before, after
+    if not owner or operands is None or any(original[n] + revised[n] != 1 for n in changed):
+        return None
+
+    sensitive_names = changed | {"locals", "vars", "eval", "exec"}
+
+    def retain(body):
+        retained = []
+        proven = set()
+        for stmt in body:
+            name = assigned_field(stmt)
+            if name in changed:
+                refs = set()
+                if isinstance(stmt.value, ast.Name) and stmt.value.id in proven:
+                    pass
+                elif not set_expression(stmt.value, stmt.value, refs):
+                    return None
+                operands.update((owner, name, kind, ref) for kind, ref in refs)
+                operands.add((owner, name, "inherited-set", name))
+                proven.add(name)
+                continue
+            for node in eager_nodes(stmt):
+                if (isinstance(node, ast.Name) and node.id in sensitive_names
+                        or isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in changed
+                        or isinstance(node, (ast.Global, ast.Nonlocal))):
+                    return None
+            retained.append(stmt)
+        return retained
+
+    left, right = retain(before), retain(after)
+    return None if left is None or right is None else (left, right)
+
+
 def declarations(path, old, new, import_lines, operands=None):
     dialect = path.startswith(("sqlglot/parsers/", "sqlglot/generators/"))
     postponed = any(isinstance(n, ast.ImportFrom) and n.module == "__future__"
                     and any(alias.name == "annotations" for alias in n.names) for n in old.body)
     verify = set()
     def visit(before, after, owner=""):
+        if dialect and owner:
+            aligned = inherited_sets(before, after, owner, operands)
+            if aligned is None:
+                return False
+            if len(aligned[0]) != len(before) or len(aligned[1]) != len(after):
+                verify.add(owner)
+            before, after = aligned
         left = {n.name: n for n in before if declaration_key(n)}
         right = {n.name: n for n in after if declaration_key(n)}
         if (sum(bool(declaration_key(n)) for n in before) != len(left)
@@ -197,7 +266,27 @@ def declarations(path, old, new, import_lines, operands=None):
             else:
                 return False
         return True
-    return verify if visit(old.body, new.body) else None
+    if not visit(old.body, new.body):
+        return None
+    if operands:
+        roots = {}
+        for owner, _, kind, name in operands:
+            if kind != "inherited-set":
+                roots.setdefault(owner, set()).add(name.split(".")[0])
+        for tree in (old, new):
+            for cls in tree.body:
+                if not isinstance(cls, ast.ClassDef) or cls.name not in roots:
+                    continue
+                names = roots[cls.name]
+                for stmt in cls.body:
+                    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name in names:
+                        return None
+                    for n in eager_nodes(stmt):
+                        if (isinstance(n, ast.Name) and (n.id in {"locals", "vars", "exec", "eval"}
+                            or n.id in names and isinstance(n.ctx, (ast.Store, ast.Del)))
+                            or isinstance(n, ast.alias) and (n.asname or n.name.split(".")[0]) in names):
+                            return None
+    return verify
 
 
 @lru_cache(maxsize=1)

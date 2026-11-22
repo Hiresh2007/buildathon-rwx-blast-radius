@@ -1,6 +1,7 @@
 """Select tests from observed configuration reads and class-construction dependencies."""
 
 import ast
+import __future__
 from collections import Counter
 import enum
 import gzip
@@ -97,13 +98,16 @@ def _changed_factories(a, b):
     return x, y
 
 
-def _approved_factory(fn):
+def _approved_factory(fn, declaration=None):
     if not isinstance(fn, FunctionType) or not fn.__module__.startswith("sqlglot"):
         return False
-    try:
-        node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
-    except (SyntaxError, OSError, TypeError):
-        return False
+    if declaration is None:
+        try:
+            node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+        except (SyntaxError, OSError, TypeError):
+            return False
+    else:
+        node = declaration
     if not isinstance(node, ast.FunctionDef) or node.decorator_list:
         return False
     formals = set(a.arg for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs)
@@ -633,15 +637,31 @@ def passive_key(value):
             and cls.__hash__ in (int.__hash__, enum.Enum.__hash__))
 
 
-def verified_operand(module, owner, field, kind, path, changed_modules):
+def verified_operand(module, owner, field, kind, path, changed_modules, local_factories=None):
     names = path.split(".")
     cls = vars(module)[owner]
+    if kind == "inherited-set":
+        if type(cls) is not type:
+            return False
+        ancestor = next((base for base in cls.__mro__[1:] if field in vars(base)), None)
+        if ancestor is None:
+            return False
+        for value in (inspect.getattr_static(cls, field), vars(ancestor)[field]):
+            if type(value) not in (set, frozenset) or not all(passive_key(v) for v in value):
+                return False
+        return True
     if names[0] in vars(cls) or names[0] not in vars(module):
         return False
     value = vars(module)[names[0]]
     if kind == "factory":
-        return (type(value) is FunctionType and value.__module__ not in changed_modules
-                and _factory_bound_to(f"{module.__name__}:{owner}.{field}", names[0]))
+        if type(value) is not FunctionType:
+            return False
+        if value.__module__ in changed_modules:
+            node = (local_factories or {}).get(value.__code__)
+            return (node is not None and node.name == value.__name__ and not node.decorator_list
+                    and bool(value.__code__.co_flags & __future__.annotations.compiler_flag)
+                    and _approved_factory(value, node))
+        return _factory_bound_to(f"{module.__name__}:{owner}.{field}", names[0])
     for name in names[1:]:
         if type(value) is ModuleType:
             if name not in vars(value):
@@ -665,6 +685,7 @@ def verify_declarations(root):
     payload = json.load(sys.stdin)
     files = {_module(path): (path, source) for path, source in payload["files"].items()}
     loaded = set()
+    top_codes = {}
     original = importlib.machinery.SourceFileLoader.get_code
     def load(loader, name):
         if name in files:
@@ -672,7 +693,9 @@ def verify_declarations(root):
             if not Path(loader.path).samefile(root / path):
                 raise ImportError(name)
             loaded.add(name)
-            return compile(source, loader.path, "exec", dont_inherit=True)
+            code = compile(source, loader.path, "exec", dont_inherit=True)
+            top_codes[name] = [c for c in code.co_consts if type(c) is CodeType]
+            return code
         return original(loader, name)
     importlib.machinery.SourceFileLoader.get_code = load
     _import_all(root)
@@ -682,8 +705,24 @@ def verify_declarations(root):
         module = sys.modules[_module(path)]
         if not Path(module.__file__).samefile(root / path):
             return
-        for owner, field, kind, reference in payload.get("operands", {}).get(path, ()):
-            if not verified_operand(module, owner, field, kind, reference, files):
+        requests = payload.get("operands", {}).get(path, ())
+        local_factories = {}
+        for _, _, kind, reference in requests:
+            if kind != "factory":
+                continue
+            fn = vars(module).get(reference)
+            if (type(fn) is not FunctionType or fn.__module__ not in files
+                    or not any(c is fn.__code__ for c in top_codes[fn.__module__])):
+                continue
+            _, source = files[fn.__module__]
+            declarations = ast.parse(source).body
+            for node in declarations:
+                if (isinstance(node, ast.FunctionDef) and node.name == fn.__name__
+                        and node.lineno == fn.__code__.co_firstlineno):
+                    local_factories[fn.__code__] = node
+                    break
+        for owner, field, kind, reference in requests:
+            if not verified_operand(module, owner, field, kind, reference, files, local_factories):
                 return
         for name in names:
             if not name:
