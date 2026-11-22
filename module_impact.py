@@ -13,6 +13,7 @@ from cold_coverage import digest, profile
 from impact import _apply, _parse_diff
 from symbols import _factory_form, _module, _signature
 from module_patterns import changed_pattern, private_users
+from deferred_calls import observed_calls
 
 
 def declaration_key(node):
@@ -428,7 +429,11 @@ def boundary_selection(text, index, prepared, selected, price, protected):
             bits |= index.test_files[path] | index.isolated.get(path, index.all_bits) | index.unknown
             bits |= index.reads.get(path, 0) | index.execution.child_reads.get(path, 0)
         else:
-            bits |= module_tests(index, path) | index.cache_consumers.floor(path, replaced, inserted)
+            consumers = module_tests(index, path)
+            calls = observed_calls(index, path, prepared[path], data)
+            if calls is not None:
+                consumers &= calls
+            bits |= consumers | index.cache_consumers.floor(path, replaced, inserted)
     revised = selected & index.tests_from_bits(bits)
     revised |= protected
     if revised == selected:
