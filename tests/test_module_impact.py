@@ -16,6 +16,18 @@ class ModuleBoundaryTests(unittest.TestCase):
     def declarations(self, old, new, lines=(), path=None):
         return declarations(path or self.path, ast.parse(old), ast.parse(new), set(lines))
 
+    def test_untouched_repeated_bindings_keep_their_order_and_bodies(self):
+        getters = "    @property\n    def state(self): return self._state\n"
+        setters = "    @state.setter\n    def state(self, value): self._state = value\n"
+        original = self.prefix + getters + setters + self.first
+        changed = original.replace("return 1", "return 2")
+        self.assertEqual(self.declarations(original, changed), set())
+        for revised in (changed.replace("= value", "= None"),
+                        self.prefix + setters + getters + self.first,
+                        self.prefix + getters + self.first + setters,
+                        self.prefix + getters + self.first):
+            self.assertIsNone(self.declarations(original, revised))
+
     def test_deferred_body_changes_have_no_import_probe(self):
         old = self.prefix + self.first + self.second
         new = old.replace("return 1", "return self.second()")

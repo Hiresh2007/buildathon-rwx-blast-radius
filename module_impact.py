@@ -146,9 +146,23 @@ def declarations(path, old, new, import_lines, operands=None):
     def visit(before, after, owner=""):
         left = {n.name: n for n in before if declaration_key(n)}
         right = {n.name: n for n in after if declaration_key(n)}
+        frozen = set()
         if (sum(bool(declaration_key(n)) for n in before) != len(left)
                 or sum(bool(declaration_key(n)) for n in after) != len(right)):
-            return False
+            for body in (before, after):
+                counts = Counter(declaration_key(n) for n in body if declaration_key(n))
+                frozen.update(name for name, count in counts.items() if count > 1)
+            # Overloads and property accessors can bind a name several times.
+            # Treat them as fixed module statements whose syntax and original
+            # position must match in both revisions.
+            prior = [(i, n) for i, n in enumerate(before) if declaration_key(n) in frozen]
+            revised = [(i, n) for i, n in enumerate(after) if declaration_key(n) in frozen]
+            if len(prior) != len(revised) or any(i != j or not same_syntax(n, m)
+                    for (i, n), (j, m) in zip(prior, revised)):
+                return False
+            for name in frozen:
+                left.pop(name, None)
+                right.pop(name, None)
         common = left.keys() & right.keys()
         changed_names = left.keys() ^ right.keys()
         if changed_names and (not owner or not dialect
@@ -157,7 +171,7 @@ def declarations(path, old, new, import_lines, operands=None):
             return False
         def ordering(body):
             return [declaration_key(n) if declaration_key(n) else None for n in body
-                    if not declaration_key(n) or declaration_key(n) in common]
+                    if not declaration_key(n) or declaration_key(n) in common or declaration_key(n) in frozen]
         if ordering(before) != ordering(after):
             return False
         for name in left.keys() | right.keys():
@@ -176,8 +190,8 @@ def declarations(path, old, new, import_lines, operands=None):
             if not simple_function(node, postponed):
                 return False
             verify.add(owner)
-        a_rest = [n for n in before if not declaration_key(n)]
-        b_rest = [n for n in after if not declaration_key(n)]
+        a_rest = [n for n in before if not declaration_key(n) or declaration_key(n) in frozen]
+        b_rest = [n for n in after if not declaration_key(n) or declaration_key(n) in frozen]
         if len(a_rest) != len(b_rest):
             return False
         for a, b in zip(a_rest, b_rest):
