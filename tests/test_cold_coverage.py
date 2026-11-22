@@ -51,6 +51,15 @@ class ColdCoverageTests(unittest.TestCase):
         with patch('cold_coverage.profile', return_value=data):
             self.assertEqual(unaffected(self.delta(updated), index), {2})
 
+    def test_partial_schedules_keep_protected_tests_and_require_a_cost_reduction(self):
+        from selector import refine_partial
+        selected = {1, 2, 3}
+        costs = {1: 6000, 2: 50, 3: 0}
+        with patch('cold_coverage.profiled_tests', return_value=selected), patch('cold_coverage.unaffected', return_value=selected) as check:
+            self.assertEqual(refine_partial('', None, {}, selected, {1}, costs), selected)
+            check.assert_not_called()
+            self.assertEqual(refine_partial('', None, {}, selected, {2}, costs), {2})
+
     def test_raw_reads_caches_children_and_unmeasured_tests_are_retained(self):
         index, data = self.fixture()
         updated = self.old.replace('is not None', 'is None')

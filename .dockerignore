@@ -4,3 +4,6 @@
 !/requirements.lock
 !/tools/
 !/tools/build_children.py
+!/tools/profile_cold_test.py
+!/tools/pack_cold_coverage.py
+!/tools/build_cold_profiles.py

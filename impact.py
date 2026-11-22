@@ -17,7 +17,7 @@ from arguments import ArgumentIndex
 from ast_syntax import same_syntax
 from cache_impact import CacheConsumers
 from default_impact import DefaultIndex, functions
-from execution import ExecutionIndex, ScopeChange, changes as changed_scopes, scalar_replacements
+from execution import ExecutionIndex, ScopeChange, changes as changed_scopes, compiled_candidate, scalar_replacements
 from lookup_domains import LookupDomains
 from none_comparisons import NoneComparisons
 from truth_guards import TruthGuards
@@ -358,7 +358,7 @@ def _prepare_change(change, index):
     if detect_encoding(BytesIO(raw).readline)[0] != detect_encoding(BytesIO(source.text.encode("utf-8")).readline)[0]:
         raise PatchError("changed source encoding")
     tree = compile(raw, change.path, "exec", ast.PyCF_ONLY_AST, dont_inherit=True)
-    compile(tree, change.path, "exec", dont_inherit=True)
+    compiled_candidate(tree, change.path)
     return source, changed, tree, replaced, inserted
 
 
@@ -448,7 +448,7 @@ def _test_module_change(change, index, prepared):
                 if node.name.startswith("test_") and not node.decorator_list
                 and f"{path}::{name.replace('.', '::')}" in index.test_names}
     original = ExecutionIndex.baseline(source.text, path)
-    changed = changed_scopes(original, compile(tree, path, "exec", dont_inherit=True))
+    changed = changed_scopes(original, compiled_candidate(tree, path))
     if not changed or any((before.co_firstlineno, before.co_qualname) not in eligible
                           or not scalar_replacements(before, after) for before, after in changed):
         return None

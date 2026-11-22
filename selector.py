@@ -60,6 +60,23 @@ def schedule_cost(numbers, milliseconds):
     return 2000 * len(workers) + maximum
 
 
+def refine_partial(patch, index, prepared, selected, protected, milliseconds):
+    from cold_coverage import profiled_tests, unaffected
+
+    eligible = (selected & profiled_tests(index)) - protected
+    if not eligible:
+        return selected
+    before = schedule_cost(selected, milliseconds)
+    if before - schedule_cost(selected - eligible, milliseconds) < 1000:
+        return selected
+    spared = unaffected(patch, index, prepared, partial=True) & eligible
+    if spared:
+        revised = selected - spared
+        if before - schedule_cost(revised, milliseconds) >= 1000:
+            return revised
+    return selected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path, nargs="?", default=Path("/data"))
@@ -70,6 +87,7 @@ def main():
         index = ImpactIndex(json.load(stream), tests)
     probe = QueryProbe(tests)
     milliseconds = {t["number"]: math.floor(t["seconds"] * 1000 + 0.5) for t in tests}
+    costly = {number for number, duration in milliseconds.items() if duration >= 1000}
     free_tests = {number for number, duration in milliseconds.items() if duration == 0}
     patches = {}
     selections = {}
@@ -99,8 +117,12 @@ def main():
                 if full_cost - schedule_cost(revised, milliseconds) >= 1000:
                     selected = revised
                     cold_only.add(path.stem)
-        elif not protected[path.stem]:
-            selected = probe.select(patch, index, selected, milliseconds, schedule)
+        else:
+            original = selected
+            if not protected[path.stem]:
+                selected = probe.select(patch, index, selected, milliseconds, schedule)
+            if prepared and selected == original and not costly.isdisjoint(selected):
+                selected = refine_partial(patch, index, prepared, selected, protected[path.stem], milliseconds)
         selections[path.stem] = selected
     if time.monotonic() - started < 140:
         candidates = {key: selections[key] for key in patches if selections[key] != index.all and not protected[key] and key not in cold_only}

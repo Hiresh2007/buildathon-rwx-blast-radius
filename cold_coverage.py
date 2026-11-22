@@ -9,17 +9,18 @@ from pathlib import Path
 import platform
 import sys
 
-from execution import (ScopeChange, block_starts, bytecode_key, changes, first_changed_blocks,
+from execution import (ScopeChange, block_starts, bytecode_key, changes, compiled_candidate, first_changed_blocks,
                        instructions, scope_name)
 from impact import _parse_diff, _prepare_change
 
 
-@lru_cache(maxsize=1)
-def profile():
-    filename = f"cold-{sys.platform}-{platform.machine()}.json.gz"
+@lru_cache(maxsize=2)
+def profile(partial=False):
+    prefix = "cold-partial" if partial else "cold"
+    filename = f"{prefix}-{sys.platform}-{platform.machine()}.json.gz"
     path = Path(__file__).with_name(filename)
     if not path.is_file():
-        return None
+        return profile() if partial else None
     try:
         with gzip.open(path, "rt") as reader:
             data = json.load(reader)
@@ -29,6 +30,17 @@ def profile():
             or data.get("platform") != sys.platform or data.get("machine") != platform.machine()):
         return None
     return data
+
+
+@lru_cache(maxsize=1)
+def profiled_tests(index):
+    data = profile(partial=True)
+    if not data or data["ids"] != index.execution_ids:
+        return set()
+    members = 0
+    for group in data["groups"]:
+        members |= int(group, 16)
+    return index.tests_from_bits(members) - index.unmeasured
 
 
 @lru_cache(maxsize=40)
@@ -79,9 +91,9 @@ def cold_hits(data, path, scope, fingerprint, offsets, generator):
             reached |= int(groups, 16)
     return reached
 
-def unaffected(text, index, prepared=None):
+def unaffected(text, index, prepared=None, *, partial=False):
     """Find tests that miss every edit in both cold and warm original executions."""
-    data = profile()
+    data = profile(partial)
     if not data or data["ids"] != index.execution_ids:
         return set()
     groups = (1 << len(data["groups"])) - 1
@@ -104,7 +116,7 @@ def unaffected(text, index, prepared=None):
             if not groups or not warm:
                 return set()
             baseline = index.execution.baseline(source.text, path)
-            candidate = compile(tree, path, "exec", dont_inherit=True)
+            candidate = compiled_candidate(tree, path)
             for old, new in changes(baseline, candidate):
                 if old.co_flags & (inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR):
                     return set()

@@ -8,7 +8,7 @@ from pathlib import Path
 import unittest
 
 from ast_syntax import same_syntax
-from execution import ExecutionIndex, ScopeChange, changes, only_local_conditions, scalar_replacements
+from execution import ExecutionIndex, ScopeChange, changes, compiled_candidate, only_local_conditions, scalar_replacements
 from impact import ImpactIndex, Source, _apply, _parse_diff, _separate_declarations, _statements, choose_tests
 from selector import fill_slack, schedule
 
@@ -29,6 +29,11 @@ class SchedulerTests(unittest.TestCase):
                           ast.dump(ast.parse(old.replace('return 2', 'return 7')))])
         self.assertEqual(ast.dump(source.tree), source.syntax)
         self.assertEqual(ast.dump(tree), ast.dump(ast.parse(updated)))
+        original_code = compiled_candidate(tree, path)
+        self.assertIs(original_code, compiled_candidate(tree, path))
+        for part in parts:
+            self.assertIsNot(original_code, compiled_candidate(part[2], path))
+            self.assertEqual(compiled_candidate(part[2], path), compile(part[2], path, "exec", dont_inherit=True))
 
     def test_default_and_body_of_same_function_are_disjoint(self):
         path = 'sqlglot/example.py'
