@@ -13,6 +13,7 @@ from types import CodeType
 from ast_syntax import same_syntax
 from cold_coverage import digest
 from execution import compiled_candidate, scope_name, signature
+from forwarding_decorators import deferred_decorators
 
 
 @lru_cache(maxsize=4)
@@ -153,11 +154,7 @@ def changed_functions(before, after, original, candidate):
                     c.co_flags & (0x20 | 0x80 | 0x200)
                     or a.name.startswith("__")
                     or ast.get_docstring(a, clean=False) != ast.get_docstring(b, clean=False)
-                    or any(
-                        not isinstance(deco, ast.Name)
-                        or deco.id not in ("staticmethod", "classmethod", "property")
-                        for deco in a.decorator_list
-                    )
+                    or not deferred_decorators(a, before, after)
                 ):
                     return False
                 if (
